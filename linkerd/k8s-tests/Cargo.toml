@@ -1,0 +1,13 @@
+[package]
+name = "linkerd-k8s-tests"
+version = "0.1.0"
+license = "Apache-2.0"
+edition = "2018"
+publish = false
+description = "Proxy integration test runner for Kubernetes"
+
+[dependencies]
+anyhow = "1"
+ort-grpc = { git = "https://github.com/olix0r/ort", tag = "v0.1.16" }
+linkerd-tracing = { path = "../tracing" }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
