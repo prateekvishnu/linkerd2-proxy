@@ -18,7 +18,7 @@ tracing = "0.1.26"
 thiserror = "1"
 
 [dev-dependencies]
-hyper = "0.14"
+hyper = { version = "0.14", default-features = false }
 linkerd-tracing = { path = "../tracing", features = ["ansi"] }
 tokio = { version = "1", features = ["macros", "rt"]}
 

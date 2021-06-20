@@ -224,9 +224,9 @@ checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.0.0"
+version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ece68d15c92e84fa4f19d3780f1294e5ca82a78a6d515f1efaabcc144688be00"
+checksum = "5fc25a87fa4fd2094bffb06925852034d90a17f0d1e05197d4956d3555752191"
 dependencies = [
  "matches",
  "percent-encoding",
@@ -1031,16 +1031,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "linkerd-k8s-tests"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "linkerd-tracing",
- "ort-grpc",
- "tokio",
-]
-
-[[package]]
 name = "linkerd-metrics"
 version = "0.1.0"
 dependencies = [
@@ -1657,39 +1647,6 @@ dependencies = [
  "prost-types",
  "tonic",
  "tonic-build",
-]
-
-[[package]]
-name = "ort-core"
-version = "0.1.0"
-source = "git+https://github.com/olix0r/ort?tag=v0.1.16#77a7cc89f4147e39f65defb04472c864321c938c"
-dependencies = [
- "async-trait",
- "bytes",
- "indexmap",
- "rand",
- "regex",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "ort-grpc"
-version = "0.1.0"
-source = "git+https://github.com/olix0r/ort?tag=v0.1.16#77a7cc89f4147e39f65defb04472c864321c938c"
-dependencies = [
- "async-trait",
- "drain",
- "futures",
- "http",
- "ort-core",
- "prost",
- "prost-types",
- "tokio",
- "tonic",
- "tonic-build",
- "tracing",
- "tracing-futures",
 ]
 
 [[package]]
@@ -2573,9 +2530,9 @@ dependencies = [
 
 [[package]]
 name = "wasi"
-version = "0.10.2+wasi-snapshot-preview1"
+version = "0.10.0+wasi-snapshot-preview1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd6fbd9a79829dd1ad0cc20627bf1ed606756a7f77edff7b66b7064f9cb327c6"
+checksum = "1a143597ca7c7793eff794def352d41792a93c481eb1042423ff7ff72ba2c31f"
 
 [[package]]
 name = "wasm-bindgen"

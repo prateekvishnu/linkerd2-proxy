@@ -12,7 +12,7 @@ The linkerd proxy's admin server.
 [dependencies]
 html-escape = "0.2"
 http = "0.2"
-hyper = { version = "0.14", features = ["http1", "http2"] }
+hyper = { version = "0.14", default-features = false }
 futures = { version = "0.3", default-features = false }
 linkerd-app-core = { path = "../core" }
 linkerd-app-inbound = { path = "../inbound" }
