@@ -5,6 +5,7 @@ resolver = "2"
 
 members = [
     "hyper-balance",
+    "k8s-tests",
     "linkerd/addr",
     "linkerd/app/admin",
     "linkerd/app/core",

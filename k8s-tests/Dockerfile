@@ -5,10 +5,9 @@ FROM $RUST_IMAGE as build
 WORKDIR /build
 COPY . .
 RUN --mount=type=cache,from=rust:1.53.0-buster,source=/usr/local/cargo,target=/usr/local/cargo \
-	(cd k8s-tests && cargo build) && \
-	mv target/debug/linkerd-k8s-tests /out/linkerd-k8s-tests
+	(cd k8s-tests && cargo build)
 
 FROM $RUNTIME_IMAGE as runtime
-COPY --from=build /out/linkerd-k8s-tests /usr/local/bin/linkerd-k8s-tests
+COPY --from=build /build/target/debug/k8s-tests /usr/local/bin/k8s-tests
 ENV RUST_LOG=debug
-ENTRYPOINT ["/usr/local/bin/linkerd-k8s-tests"]
+ENTRYPOINT ["/usr/local/bin/k8s-tests"]

@@ -100,6 +100,14 @@ jobs:
           make docker
           ./target/bin/k3d image import "${DOCKER_TAG}"
 
-      - name: Run tests
+      - name: Build tests
         run: |
-          exit 1 # TODO
+          img="ghcr.io/linkerd/k8s-tests:latest"
+          docker buildx build -t "$img" -f ./k8s-tests/Dockerfile .
+          ./target/bin/k3d image import "$img"
+          c="$(docker run -d "$img")"
+          docker cp "$c:/usr/local/bin/k8s-tests" target/bin/k8s-tests
+          docker rm -f "$c"
+
+      - name: Run tests
+        run: ./target/bin/k8s-tests deploy "$(git rev-parse --short HEAD)"
