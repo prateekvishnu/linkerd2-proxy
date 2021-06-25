@@ -35,9 +35,8 @@ fn init_tracing() {
     use tracing_subscriber::prelude::*;
     use tracing_subscriber::{fmt, registry, EnvFilter};
 
-    let fmt_layer = fmt::layer().with_target(false);
     let filter_layer = EnvFilter::try_from_default_env()
         .or_else(|_| EnvFilter::try_new("info"))
         .unwrap();
-    registry().with(filter_layer).with(fmt_layer).init()
+    registry().with(filter_layer).with(fmt::layer()).init()
 }
