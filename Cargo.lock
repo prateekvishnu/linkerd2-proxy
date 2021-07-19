@@ -746,6 +746,7 @@ dependencies = [
  "linkerd-app-test",
  "linkerd-io",
  "linkerd-tracing",
+ "parking_lot",
  "thiserror",
  "tokio",
  "tokio-test",

@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::inconsistent_struct_constructor)]
 
+mod accept_ports;
 mod allow_discovery;
 pub mod direct;
 pub mod http;
