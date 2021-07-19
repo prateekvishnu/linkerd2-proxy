@@ -7,11 +7,17 @@ pub mod runner;
 pub mod server;
 
 use anyhow::{anyhow, Result};
-use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
+use k8s_openapi::{
+    api::apps::v1 as apps,
+    apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition,
+};
 use kube::{CustomResource, CustomResourceExt, ResourceExt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use tracing::info;
+
+const FIELD_MANAGER: &str = "k8s-tests.proxy.linkerd.io";
 
 /// Describes a server interface exposed by a set of pods.
 #[derive(Clone, Debug, CustomResource, Deserialize, Serialize, JsonSchema)]
@@ -46,17 +52,17 @@ pub struct Deploy {
     pub proxy_image: String,
 }
 
-pub async fn create_crds(client: kube::Client, timeout_secs: u32) -> Result<()> {
+pub async fn create_crds(client: kube::Client, timeout: Duration, dry_run: bool) -> Result<()> {
     let api = kube::Api::all(client);
-    let crd = create_crd::<TestResult>(&api, timeout_secs).await?;
-    info!(crd = %crd.name(), "Created");
+    let crd = create_crd::<TestResult>(&api, timeout, dry_run).await?;
+    info!(crd = %crd.name(), ?dry_run, "Created");
 
     Ok(())
 }
 
-pub async fn apply_crds(client: kube::Client, timeout_secs: u32) -> Result<()> {
-    let crd = apply_crd::<TestResult>(client, timeout_secs).await?;
-    info!(crd = %crd.name(), "Applied");
+pub async fn apply_crds(client: kube::Client, timeout: Duration, dry_run: bool) -> Result<()> {
+    let crd = apply_crd::<TestResult>(client, timeout, dry_run).await?;
+    info!(crd = %crd.name(), ?dry_run, "Applied");
 
     Ok(())
 }
@@ -71,60 +77,81 @@ pub async fn delete_crds(client: kube::Client) -> Result<()> {
     Ok(())
 }
 
+/// Updates a T-typed CRD in the cluster and wait for it to accepted by the API server. Fails if the
+/// CRD already exists.
 async fn apply_crd<T: CustomResourceExt>(
     client: kube::Client,
-    timeout_secs: u32,
+    timeout: Duration,
+    dry_run: bool,
 ) -> Result<CustomResourceDefinition> {
     use kube::api::{Patch, PatchParams};
 
     let api = kube::Api::<CustomResourceDefinition>::all(client);
 
-    let params = PatchParams::apply("apply");
+    let params = PatchParams {
+        field_manager: Some(FIELD_MANAGER.to_string()),
+        dry_run,
+        force: false,
+    };
     let crd = T::crd();
     let name = crd.name();
-    api.patch(&name, &params, &Patch::Apply(crd)).await?;
+    let crd = api.patch(&name, &params, &Patch::Apply(crd)).await?;
 
-    crd_accepted(&api, &name, timeout_secs)
+    if dry_run {
+        return Ok(crd);
+    }
+
+    crd_accepted(&api, &name, timeout)
         .await?
-        .ok_or_else(|| {
-            anyhow!(
-                "{} was not accepted in within {} seconds",
-                name,
-                timeout_secs
-            )
-        })
+        .ok_or_else(|| anyhow!("{} was not accepted in within {:?}", name, timeout))
 }
 
+/// Creates a T-typed CRD in the cluster and wait for it to accepted by the API server. Fails if the
+/// CRD already exists.
 async fn create_crd<T: CustomResourceExt>(
     api: &kube::Api<CustomResourceDefinition>,
-    timeout_secs: u32,
+    timeout: Duration,
+    dry_run: bool,
 ) -> Result<CustomResourceDefinition> {
-    let crd = api
-        .create(&kube::api::PostParams::default(), &T::crd())
-        .await?;
-    crd_accepted(api, &crd.name(), timeout_secs)
+    let params = kube::api::PostParams {
+        dry_run,
+        field_manager: Some(FIELD_MANAGER.to_string()),
+    };
+    let crd = api.create(&params, &T::crd()).await?;
+
+    if dry_run {
+        return Ok(crd);
+    }
+
+    crd_accepted(api, &crd.name(), timeout)
         .await?
-        .ok_or_else(|| {
-            anyhow!(
-                "{} was not accepted within {} seconds",
-                crd.name(),
-                timeout_secs
-            )
-        })
+        .ok_or_else(|| anyhow!("{} was not accepted within {:?}", crd.name(), timeout))
 }
 
+/// Waits for the named CRD to be accepted by the API server.
 async fn crd_accepted(
     api: &kube::Api<CustomResourceDefinition>,
     name: &str,
-    timeout_secs: u32,
+    timeout: Duration,
 ) -> Result<Option<CustomResourceDefinition>> {
     use futures::prelude::*;
     use kube::api::{ListParams, WatchEvent};
 
+    fn is_accepted(crd: &CustomResourceDefinition) -> bool {
+        crd.status
+            .as_ref()
+            .map(|s| {
+                s.conditions
+                    .iter()
+                    .any(|c| c.type_ == "NamesAccepted" && c.status == "True")
+            })
+            .unwrap_or(false)
+    }
+
     let mut stream = {
         let lp = ListParams::default()
             .fields(&format!("metadata.name={}", name))
-            .timeout(timeout_secs);
+            .timeout(timeout.as_secs() as u32);
         api.watch(&lp, "0").await?.boxed_local()
     };
 
@@ -143,13 +170,67 @@ async fn crd_accepted(
     Ok(None)
 }
 
-fn is_accepted(crd: &CustomResourceDefinition) -> bool {
-    crd.status
-        .as_ref()
-        .map(|s| {
-            s.conditions
-                .iter()
-                .any(|c| c.type_ == "NamesAccepted" && c.status == "True")
-        })
-        .unwrap_or(false)
+async fn create_deploy(
+    client: kube::Client,
+    deploy: apps::Deployment,
+    timeout: Duration,
+    dry_run: bool,
+) -> Result<apps::Deployment> {
+    use kube::api::PostParams;
+
+    let api = kube::Api::<apps::Deployment>::namespaced(client, &*deploy.namespace().unwrap());
+    let deploy = {
+        let params = PostParams {
+            dry_run,
+            field_manager: Some(FIELD_MANAGER.to_string()),
+        };
+        api.create(&params, &deploy).await?
+    };
+
+    if dry_run {
+        return Ok(deploy);
+    }
+
+    let name = deploy.name();
+    deploy_available(&api, &name, timeout)
+        .await?
+        .ok_or_else(|| anyhow!("{} was not available in within {:?}", name, timeout))
+}
+
+async fn deploy_available(
+    api: &kube::Api<apps::Deployment>,
+    name: &str,
+    timeout: Duration,
+) -> Result<Option<apps::Deployment>> {
+    use futures::prelude::*;
+    use kube::api::{ListParams, WatchEvent};
+
+    fn is_available(d: &apps::Deployment) -> bool {
+        if let Some(s) = d.status.as_ref() {
+            return s.available_replicas.unwrap_or(0) > 0;
+        }
+
+        false
+    }
+
+    let mut stream = {
+        let lp = ListParams::default()
+            .fields(&format!("metadata.name={}", name))
+            .timeout(timeout.as_secs() as u32);
+        api.watch(&lp, "0").await?.boxed_local()
+    };
+
+    while let Some(status) = stream.try_next().await? {
+        match status {
+            WatchEvent::Added(d) if is_available(&d) => {
+                return Ok(Some(d));
+            }
+            WatchEvent::Modified(d) if is_available(&d) => {
+                return Ok(Some(d));
+            }
+            _ => {}
+        }
+    }
+
+    Ok(None)
 }

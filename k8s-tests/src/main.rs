@@ -7,8 +7,14 @@ use structopt::StructOpt;
 
 #[derive(Clone, Debug, StructOpt)]
 enum Cmd {
-    CreateCrds,
-    ApplyCrds,
+    CreateCrds {
+        #[structopt(long)]
+        dry_run: bool,
+    },
+    ApplyCrds {
+        #[structopt(long)]
+        dry_run: bool,
+    },
     DeleteCrds,
     Deploy(k8s_tests::deploy::Args),
     Runner(k8s_tests::runner::Args),
@@ -21,9 +27,10 @@ async fn main() -> Result<()> {
 
     let cmd = Cmd::from_args();
     let client = kube::Client::try_default().await?;
+    const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
     match cmd {
-        Cmd::CreateCrds => k8s_tests::create_crds(client, 10).await,
-        Cmd::ApplyCrds => k8s_tests::apply_crds(client, 10).await,
+        Cmd::CreateCrds { dry_run } => k8s_tests::create_crds(client, TIMEOUT, dry_run).await,
+        Cmd::ApplyCrds { dry_run } => k8s_tests::apply_crds(client, TIMEOUT, dry_run).await,
         Cmd::DeleteCrds => k8s_tests::delete_crds(client).await,
         Cmd::Runner(cmd) => cmd.run(client).await,
         Cmd::Server(cmd) => cmd.run().await,
