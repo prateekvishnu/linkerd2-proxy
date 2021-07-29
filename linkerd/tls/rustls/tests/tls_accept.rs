@@ -1,5 +1,10 @@
 #![cfg(test)]
 
+// These are basically integration tests for the `connection` submodule, but
+// they cannot be "real" integration tests because `connection` isn't a public
+// interface and because `connection` exposes a `#[cfg(test)]`-only API for use
+// by these tests.
+
 use futures::prelude::*;
 use linkerd_conditional::Conditional;
 use linkerd_error::Infallible;

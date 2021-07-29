@@ -50,10 +50,10 @@ where
         .get_ref()
         .1
         .get_alpn_protocol()
-        .map(|b| NegotiatedProtocol(b.into()));
+        .map(|b| tls::NegotiatedProtocol(b.into()));
 
     debug!(client.id = ?client_id, alpn = ?negotiated_protocol, "Accepted TLS connection");
-    let tls = ServerTls::Established {
+    let tls = tls::ServerTls::Established {
         client_id,
         negotiated_protocol,
     };
@@ -71,7 +71,7 @@ fn client_identity<S>(tls: &TlsStream<S>) -> Option<ClientId> {
 
     match dns_names.first()? {
         GeneralDNSNameRef::DNSName(n) => {
-            Some(ClientId(id::Name::from(dns::Name::from(n.to_owned()))))
+            Some(tls::ClientId(id::Name::from(dns::Name::from(n.to_owned()))))
         }
         GeneralDNSNameRef::Wildcard(_) => {
             // Wildcards can perhaps be handled in a future path...

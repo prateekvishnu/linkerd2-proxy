@@ -4,6 +4,7 @@ use crate::{LocalId, NegotiatedProtocol, ServerId};
 use bytes::BytesMut;
 use futures::prelude::*;
 use linkerd_conditional::Conditional;
+use linkerd_dns_name::Name;
 use linkerd_error::Error;
 use linkerd_identity as id;
 use linkerd_io::{self as io, AsyncReadExt, EitherIo, PrefixedIo};
@@ -35,7 +36,7 @@ pub fn empty_config() -> ServerConfig {
 
 /// A newtype for remote client idenities.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub struct ClientId(pub id::Name);
+pub struct ClientId(pub Name);
 
 /// Indicates a serverside connection's TLS status.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -260,20 +261,20 @@ where
 
 // === impl ClientId ===
 
-impl From<id::Name> for ClientId {
-    fn from(n: id::Name) -> Self {
+impl From<Name> for ClientId {
+    fn from(n: Name) -> Self {
         Self(n)
     }
 }
 
-impl From<ClientId> for id::Name {
-    fn from(ClientId(name): ClientId) -> id::Name {
+impl From<ClientId> for Name {
+    fn from(ClientId(name): ClientId) -> Name {
         name
     }
 }
 
-impl AsRef<id::Name> for ClientId {
-    fn as_ref(&self) -> &id::Name {
+impl AsRef<Name> for ClientId {
+    fn as_ref(&self) -> &Name {
         &self.0
     }
 }
@@ -287,7 +288,7 @@ impl fmt::Display for ClientId {
 impl FromStr for ClientId {
     type Err = id::InvalidName;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        id::Name::from_str(s).map(Self)
+        Name::from_str(s).map(Self)
     }
 }
 
@@ -329,7 +330,7 @@ mod tests {
             .await
             .expect("SNI detection must not fail");
 
-        let identity = id::Name::from_str("example.com").unwrap();
+        let identity = Name::from_str("example.com").unwrap();
         assert_eq!(sni, Some(ServerId(identity)));
 
         match io {

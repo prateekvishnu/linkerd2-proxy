@@ -6,7 +6,7 @@ use futures::{
     prelude::*,
 };
 use linkerd_conditional::Conditional;
-use linkerd_identity as id;
+use linkerd_dns_name::{InvalidName, Name};
 use linkerd_io as io;
 use linkerd_stack::{self as svc, Param, ServiceExt};
 use std::{
@@ -20,7 +20,7 @@ use tracing::{debug, trace};
 
 /// A newtype for target server identities.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub struct ServerId(pub id::Name);
+pub struct ServerId(pub Name);
 
 /// A stack paramter that configures a `Client` to establish a TLS connection.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -135,28 +135,29 @@ where
 
 // === impl ServerId ===
 
-impl From<id::Name> for ServerId {
-    fn from(n: id::Name) -> Self {
+impl From<Name> for ServerId {
+    fn from(n: Name) -> Self {
         Self(n)
     }
 }
 
-impl From<ServerId> for id::Name {
-    fn from(ServerId(name): ServerId) -> id::Name {
+impl From<ServerId> for Name {
+    fn from(ServerId(name): ServerId) -> Name {
         name
     }
 }
 
-impl AsRef<id::Name> for ServerId {
-    fn as_ref(&self) -> &id::Name {
+impl AsRef<Name> for ServerId {
+    fn as_ref(&self) -> &Name {
         &self.0
     }
 }
 
 impl FromStr for ServerId {
-    type Err = id::InvalidName;
+    type Err = InvalidName;
+
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        id::Name::from_str(s).map(ServerId)
+        Name::from_str(s).map(ServerId)
     }
 }
 
