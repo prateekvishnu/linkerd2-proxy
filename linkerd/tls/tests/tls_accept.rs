@@ -15,10 +15,9 @@ use linkerd_proxy_transport::{
     listen::{Addrs, Bind, BindTcp},
     ConnectTcp, Keepalive, ListenAddr,
 };
-use linkerd_stack::{ExtractParam, InsertParam, NewService, Param};
+use linkerd_stack::{NewService, Param};
 use linkerd_tls as tls;
-use std::{future::Future, time::Duration};
-use std::{net::SocketAddr, sync::mpsc};
+use std::{future::Future, net::SocketAddr, sync::mpsc, time};
 use tokio::net::TcpStream;
 use tower::{
     layer::Layer,
@@ -120,11 +119,6 @@ struct Transported<I, R> {
     result: Result<R, io::Error>,
 }
 
-#[derive(Clone)]
-struct ServerParams {
-    identity: Option<id::CrtKey>,
-}
-
 /// Runs a test for a single TCP connection. `client` processes the connection
 /// on the client side and `server` processes the connection on the server
 /// side.
@@ -160,9 +154,11 @@ where
         let (sender, receiver) = mpsc::channel::<Transported<tls::ConditionalServerTls, SR>>();
 
         let mut detect = tls::NewDetectTls::new(
-            ServerParams {
-                identity: server_tls,
-            },
+            server_tls.map(|tls| tls::server::Config {
+                id: tls.id().clone(),
+                timeout: time::Duration::from_secs(1),
+                tls: Tls(tls),
+            }),
             move |meta: (tls::ConditionalServerTls, Addrs)| {
                 let server = server.clone();
                 let sender = sender.clone();
@@ -333,15 +329,9 @@ impl Param<tls::client::Config> for Tls {
     }
 }
 
-impl Param<tls::server::Config> for Tls {
-    fn param(&self) -> tls::server::Config {
+impl Param<tls::ServerConfig> for Tls {
+    fn param(&self) -> tls::ServerConfig {
         self.0.server_config()
-    }
-}
-
-impl Param<tls::LocalId> for Tls {
-    fn param(&self) -> tls::LocalId {
-        self.0.id().clone()
     }
 }
 
@@ -359,28 +349,5 @@ impl Param<ListenAddr> for Server {
 impl Param<Keepalive> for Server {
     fn param(&self) -> Keepalive {
         Keepalive(None)
-    }
-}
-
-/// === impl ServerParams ===
-
-impl<T> ExtractParam<tls::server::Timeout, T> for ServerParams {
-    fn extract_param(&self, _: &T) -> tls::server::Timeout {
-        tls::server::Timeout(Duration::from_secs(10))
-    }
-}
-
-impl<T> ExtractParam<Option<Tls>, T> for ServerParams {
-    fn extract_param(&self, _: &T) -> Option<Tls> {
-        self.identity.clone().map(Tls)
-    }
-}
-
-impl<T> InsertParam<tls::ConditionalServerTls, T> for ServerParams {
-    type Target = (tls::ConditionalServerTls, T);
-
-    #[inline]
-    fn insert_param(&self, tls: tls::ConditionalServerTls, target: T) -> Self::Target {
-        (tls, target)
     }
 }

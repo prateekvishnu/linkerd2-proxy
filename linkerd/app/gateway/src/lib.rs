@@ -80,8 +80,7 @@ where
     I: io::AsyncRead + io::AsyncWrite + io::PeerAddr + fmt::Debug + Send + Sync + Unpin + 'static,
     O: Clone + Send + Sync + Unpin + 'static,
     O: svc::Service<outbound::tcp::Connect, Error = io::Error>,
-    O::Response:
-        io::AsyncRead + io::AsyncWrite + tls::HasNegotiatedProtocol + Send + Unpin + 'static,
+    O::Response: io::AsyncRead + io::AsyncWrite + Send + Unpin + 'static,
     O::Future: Send + Unpin + 'static,
     P: profiles::GetProfile<profiles::LookupAddr> + Clone + Send + Sync + Unpin + 'static,
     P::Future: Send + 'static,
@@ -232,10 +231,11 @@ where
         .into_stack()
         .push(svc::Filter::<ClientInfo, _>::layer(HttpLegacy::try_from))
         .push(svc::BoxNewService::layer())
-        .push(detect::NewDetectService::layer(
-            detect_protocol_timeout,
-            http::DetectHttp::default(),
-        ));
+        .push(detect::NewDetectService::layer(detect::Config {
+            detect: http::DetectHttp::default(),
+            capacity: 1024,
+            timeout: detect_protocol_timeout,
+        }));
 
     // When a transported connection is received, use the header's target to
     // drive routing.

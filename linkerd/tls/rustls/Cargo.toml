@@ -1,0 +1,15 @@
+[package]
+name = "linkerd-rustls"
+version = "0.1.0"
+authors = ["Linkerd Developers <cncf-linkerd-dev@lists.cncf.io>"]
+edition = "2018"
+publish = false
+
+[dependencies]
+futures = { version = "0.3", default-features = false }
+linkerd-io = { path = "../../io" }
+linkerd-stack = { path = "../../stack" }
+linkerd-tls = { path = "../" }
+tokio-rustls = "0.22"
+tracing = "0.1.26"
+webpki = "0.21"

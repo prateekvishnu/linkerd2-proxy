@@ -1,3 +1,6 @@
+#![allow(clippy::type_complexity)]
+
+use crate::NegotiatedProtocol;
 use futures::{
     future::{Either, MapOk},
     prelude::*,
@@ -5,17 +8,14 @@ use futures::{
 use linkerd_conditional::Conditional;
 use linkerd_identity as id;
 use linkerd_io as io;
-use linkerd_stack::{layer, Param};
+use linkerd_stack::{self as svc, Param, ServiceExt};
 use std::{
     fmt,
     future::Future,
     pin::Pin,
     str::FromStr,
-    sync::Arc,
     task::{Context, Poll},
 };
-pub use tokio_rustls::client::TlsStream;
-use tokio_rustls::rustls::{self, Session};
 use tracing::{debug, trace};
 
 /// A newtype for target server identities.
@@ -54,103 +54,81 @@ pub enum NoClientTls {
 /// known TLS identity.
 pub type ConditionalClientTls = Conditional<ClientTls, NoClientTls>;
 
-pub type Config = Arc<rustls::ClientConfig>;
-
 #[derive(Clone, Debug)]
 pub struct Client<L, C> {
-    local: Option<L>,
+    tls: Option<L>,
     inner: C,
 }
 
-type Connect<F, I> = MapOk<F, fn(I) -> io::EitherIo<I, TlsStream<I>>>;
-type Handshake<I> =
-    Pin<Box<dyn Future<Output = io::Result<io::EitherIo<I, TlsStream<I>>>> + Send + 'static>>;
-
-pub type Io<I> = io::EitherIo<I, TlsStream<I>>;
-
-// === impl ClientTls ===
-
-impl From<ServerId> for ClientTls {
-    fn from(server_id: ServerId) -> Self {
-        Self {
-            server_id,
-            alpn: None,
-        }
-    }
-}
+type Connected<I> = (Option<NegotiatedProtocol>, I);
+type Connect<F, I, J> = MapOk<F, fn(I) -> Connected<J>>;
+type Handshake<I> = Pin<Box<dyn Future<Output = io::Result<Connected<I>>> + Send + 'static>>;
 
 // === impl Client ===
 
 impl<L: Clone, C> Client<L, C> {
-    pub fn layer(local: Option<L>) -> impl layer::Layer<C, Service = Self> + Clone {
-        layer::mk(move |inner| Self {
+    pub fn layer(tls: Option<L>) -> impl svc::layer::Layer<C, Service = Self> + Clone {
+        svc::layer::mk(move |inner| Self {
             inner,
-            local: local.clone(),
+            tls: tls.clone(),
         })
     }
 }
 
-impl<L, C, T> tower::Service<T> for Client<L, C>
+impl<T, L, LIo, C> svc::Service<T> for Client<L, C>
 where
-    L: Clone + Param<Config>,
     T: Param<ConditionalClientTls>,
-    C: tower::Service<T, Error = io::Error>,
+    C: svc::Service<T, Error = io::Error>,
     C::Response: io::AsyncRead + io::AsyncWrite + Send + Unpin,
     C::Future: Send + 'static,
+    L: svc::Service<(ClientTls, C::Response), Response = Connected<LIo>, Error = io::Error>
+        + Clone
+        + Send
+        + 'static,
+    L::Future: Send + 'static,
+    LIo: io::AsyncRead + io::AsyncWrite + Send + Unpin,
 {
-    type Response = Io<C::Response>;
+    type Response = Connected<io::EitherIo<C::Response, LIo>>;
     type Error = io::Error;
-    type Future = Either<Connect<C::Future, C::Response>, Handshake<C::Response>>;
+    type Future = Either<
+        Connect<C::Future, C::Response, io::EitherIo<C::Response, LIo>>,
+        Handshake<io::EitherIo<C::Response, LIo>>,
+    >;
 
     #[inline]
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         self.inner.poll_ready(cx)
     }
 
     fn call(&mut self, target: T) -> Self::Future {
-        let ClientTls { server_id, alpn } = match target.param() {
-            Conditional::Some(tls) => tls,
+        let client_tls = target.param();
+        let connect = self.inner.call(target);
+
+        let client_tls = match client_tls {
+            Conditional::Some(client_tls) => client_tls,
             Conditional::None(reason) => {
                 debug!(%reason, "Peer does not support TLS");
-                return Either::Left(self.inner.call(target).map_ok(io::EitherIo::Left));
+                return Either::Left(connect.map_ok(|io| (None, io::EitherIo::Left(io))));
             }
         };
 
-        let handshake = match self.local.as_ref() {
-            Some(local) => {
-                // Build a rustls ClientConfig for this connection.
-                //
-                // If ALPN protocols are configured by the endpoint, we have to clone the
-                // entire configuration and set the protocols. If there are no
-                // ALPN options, clone the Arc'd base configuration without
-                // extra allocation.
-                //
-                // TODO it would be better to avoid cloning the whole TLS config
-                // per-connection.
-                match alpn {
-                    None => tokio_rustls::TlsConnector::from(local.param()),
-                    Some(AlpnProtocols(protocols)) => {
-                        let mut config: rustls::ClientConfig = local.param().as_ref().clone();
-                        config.alpn_protocols = protocols;
-                        tokio_rustls::TlsConnector::from(Arc::new(config))
-                    }
-                }
-            }
+        let tls = match self.tls.clone() {
+            Some(tls) => tls,
             None => {
                 trace!("Local identity disabled");
-                return Either::Left(self.inner.call(target).map_ok(io::EitherIo::Left));
+                return Either::Left(connect.map_ok(|io| (None, io::EitherIo::Left(io))));
             }
         };
 
-        debug!(server.id = %server_id, "Initiating TLS connection");
-        let connect = self.inner.call(target);
+        debug!(server.id = %client_tls.server_id, "Initiating TLS connection");
         Either::Right(Box::pin(async move {
-            let io = connect.await?;
-            let io = handshake.connect((&server_id.0).into(), io).await?;
-            if let Some(alpn) = io.get_ref().1.get_alpn_protocol() {
-                debug!(alpn = ?std::str::from_utf8(alpn));
+            let tcp = connect.await?;
+            let (alpn, tls): Connected<LIo> = tls.oneshot((client_tls, tcp)).await?;
+            if let Some(alpn) = alpn.as_ref() {
+                debug!(?alpn);
             }
-            Ok(io::EitherIo::Right(io))
+            let conn: Connected<io::EitherIo<C::Response, LIo>> = (alpn, io::EitherIo::Right(tls));
+            Ok(conn)
         }))
     }
 }

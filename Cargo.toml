@@ -55,6 +55,7 @@ members = [
     "linkerd/timeout",
     "linkerd/tonic-watch",
     "linkerd/tls",
+    "linkerd/tls/rustls",
     "linkerd/tracing",
     "linkerd2-proxy",
     "opencensus-proto",

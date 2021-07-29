@@ -4,32 +4,34 @@ use crate::{LocalId, NegotiatedProtocol, ServerId};
 use bytes::BytesMut;
 use futures::prelude::*;
 use linkerd_conditional::Conditional;
-use linkerd_dns_name as dns;
 use linkerd_error::Error;
 use linkerd_identity as id;
 use linkerd_io::{self as io, AsyncReadExt, EitherIo, PrefixedIo};
-use linkerd_stack::{layer, ExtractParam, InsertParam, NewService, Param};
+use linkerd_stack::{self as svc, ExtractParam, NewService, ServiceExt};
 use std::{
     fmt,
     pin::Pin,
     str::FromStr,
-    sync::Arc,
     task::{Context, Poll},
 };
 use thiserror::Error;
 use tokio::time::{self, Duration};
-use tokio_rustls::rustls::{self, Session};
-pub use tokio_rustls::server::TlsStream;
-use tower::util::ServiceExt;
 use tracing::{debug, trace, warn};
 
-pub type Config = Arc<rustls::ServerConfig>;
+#[derive(Clone)]
+pub struct Config<T> {
+    pub id: LocalId,
+    pub timeout: Duration,
+    pub tls: T,
+}
 
+/*
 /// Produces a server config that fails to handshake all connections.
-pub fn empty_config() -> Config {
+pub fn empty_config() -> ServerConfig {
     let verifier = rustls::NoClientAuth::new();
     Arc::new(rustls::ServerConfig::new(verifier))
 }
+*/
 
 /// A newtype for remote client idenities.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -69,28 +71,21 @@ pub type ConditionalServerTls = Conditional<ServerTls, NoServerTls>;
 
 type DetectIo<T> = EitherIo<T, PrefixedIo<T>>;
 
-pub type Io<T> = EitherIo<TlsStream<DetectIo<T>>, DetectIo<T>>;
-
-#[derive(Clone, Debug)]
-pub struct NewDetectTls<P, L, N> {
-    inner: N,
-    params: P,
-    _local_identity: std::marker::PhantomData<fn() -> L>,
-}
-
-#[derive(Copy, Clone, Debug)]
-pub struct Timeout(pub Duration);
-
 #[derive(Clone, Debug, Error)]
 #[error("TLS detection timed out")]
 pub struct ServerTlsTimeoutError(());
 
 #[derive(Clone, Debug)]
-pub struct DetectTls<T, P, L, N> {
-    target: T,
-    local_identity: Option<L>,
-    timeout: Timeout,
+pub struct NewDetectTls<P, L, N> {
     params: P,
+    inner: N,
+    _tls: std::marker::PhantomData<fn() -> L>,
+}
+
+#[derive(Clone)]
+pub struct DetectTls<T, L, N> {
+    target: T,
+    config: Option<Config<L>>,
     inner: N,
 }
 
@@ -105,55 +100,53 @@ const BUFFER_CAPACITY: usize = 8192;
 impl<P, L, N> NewDetectTls<P, L, N> {
     pub fn new(params: P, inner: N) -> Self {
         Self {
-            inner,
             params,
-            _local_identity: std::marker::PhantomData,
+            inner,
+            _tls: std::marker::PhantomData,
         }
     }
 
-    pub fn layer(params: P) -> impl layer::Layer<N, Service = Self> + Clone
+    pub fn layer(params: P) -> impl svc::layer::Layer<N, Service = Self> + Clone
     where
         P: Clone,
     {
-        layer::mk(move |inner| Self::new(params.clone(), inner))
+        svc::layer::mk(move |inner| Self::new(params.clone(), inner))
     }
 }
 
 impl<T, P, L, N> NewService<T> for NewDetectTls<P, L, N>
 where
-    P: ExtractParam<Timeout, T> + ExtractParam<Option<L>, T> + Clone,
+    P: ExtractParam<Option<Config<L>>, T> + Clone,
     N: Clone,
 {
-    type Service = DetectTls<T, P, L, N>;
+    type Service = DetectTls<T, L, N>;
 
     fn new_service(&mut self, target: T) -> Self::Service {
-        let timeout = self.params.extract_param(&target);
-        let local_identity = self.params.extract_param(&target);
+        let config = self.params.extract_param(&target);
         DetectTls {
             target,
-            local_identity,
-            timeout,
-            params: self.params.clone(),
+            config,
             inner: self.inner.clone(),
         }
     }
 }
 
-impl<I, T, P, L, N, NSvc> tower::Service<I> for DetectTls<T, P, L, N>
+impl<I, T, L, LIo, N, NSvc> svc::Service<I> for DetectTls<T, L, N>
 where
     I: io::Peek + io::AsyncRead + io::AsyncWrite + Send + Sync + Unpin + 'static,
     T: Clone + Send + 'static,
-    P: InsertParam<ConditionalServerTls, T> + Clone + Send + Sync + 'static,
-    P::Target: Send + 'static,
-    L: Param<LocalId> + Param<Config>,
-    N: NewService<P::Target, Service = NSvc> + Clone + Send + 'static,
-    NSvc: tower::Service<Io<I>, Response = ()> + Send + 'static,
+    L: svc::Service<DetectIo<I>, Response = (ServerTls, LIo)> + Clone + Send + 'static,
+    L::Error: Into<Error>,
+    L::Future: Send,
+    LIo: io::AsyncRead + io::AsyncWrite + Send + Sync + Unpin + 'static,
+    N: NewService<(ConditionalServerTls, T), Service = NSvc> + Clone + Send + 'static,
+    NSvc: svc::Service<EitherIo<LIo, DetectIo<I>>> + Send + 'static,
     NSvc::Error: Into<Error>,
     NSvc::Future: Send,
 {
-    type Response = ();
+    type Response = NSvc::Response;
     type Error = Error;
-    type Future = Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'static>>;
+    type Future = Pin<Box<dyn Future<Output = Result<NSvc::Response, Error>> + Send + 'static>>;
 
     fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
@@ -161,58 +154,52 @@ where
 
     fn call(&mut self, io: I) -> Self::Future {
         let target = self.target.clone();
-        let params = self.params.clone();
         let mut new_accept = self.inner.clone();
 
-        match self.local_identity.as_ref() {
-            Some(local) => {
-                let config: Config = local.param();
-                let LocalId(local_id) = local.param();
-
-                // Detect the SNI from a ClientHello (or timeout).
-                let Timeout(timeout) = self.timeout;
-                let detect = time::timeout(timeout, detect_sni(io));
-                Box::pin(async move {
-                    let (sni, io) = detect.await.map_err(|_| ServerTlsTimeoutError(()))??;
-
-                    let (peer, io) = match sni {
-                        // If we detected an SNI matching this proxy, terminate TLS.
-                        Some(ServerId(id)) if id == local_id => {
-                            trace!("Identified local SNI");
-                            let (peer, io) = handshake(config, io).await?;
-                            (Conditional::Some(peer), EitherIo::Left(io))
-                        }
-                        // If we detected another SNI, continue proxying the
-                        // opaque stream.
-                        Some(sni) => {
-                            debug!(%sni, "Identified foreign SNI");
-                            let peer = ServerTls::Passthru { sni };
-                            (Conditional::Some(peer), EitherIo::Right(io))
-                        }
-                        // If no TLS was detected, continue proxying the stream.
-                        None => (
-                            Conditional::None(NoServerTls::NoClientHello),
-                            EitherIo::Right(io),
-                        ),
-                    };
-
-                    new_accept
-                        .new_service(params.insert_param(peer, target))
-                        .oneshot(io)
-                        .err_into::<Error>()
-                        .await
-                })
-            }
-
+        let (LocalId(local_id), timeout, tls) = match self.config.as_ref() {
+            Some(Config { id, timeout, tls }) => (id.clone(), *timeout, tls.clone()),
             None => {
                 let peer = Conditional::None(NoServerTls::Disabled);
-                let svc = new_accept.new_service(params.insert_param(peer, target));
-                Box::pin(
+                let svc = new_accept.new_service((peer, target));
+                return Box::pin(
                     svc.oneshot(EitherIo::Right(EitherIo::Left(io)))
                         .err_into::<Error>(),
-                )
+                );
             }
-        }
+        };
+
+        // Detect the SNI from a ClientHello (or timeout).
+        let detect = time::timeout(timeout, detect_sni(io));
+        Box::pin(async move {
+            let (sni, io) = detect.await.map_err(|_| ServerTlsTimeoutError(()))??;
+
+            let (peer, io) = match sni {
+                // If we detected an SNI matching this proxy, terminate TLS.
+                Some(ServerId(id)) if id == local_id => {
+                    trace!("Identified local SNI");
+                    let (peer, io) = tls.oneshot(io).err_into::<Error>().await?;
+                    (Conditional::Some(peer), EitherIo::Left(io))
+                }
+                // If we detected another SNI, continue proxying the
+                // opaque stream.
+                Some(sni) => {
+                    debug!(%sni, "Identified foreign SNI");
+                    let peer = ServerTls::Passthru { sni };
+                    (Conditional::Some(peer), EitherIo::Right(io))
+                }
+                // If no TLS was detected, continue proxying the stream.
+                None => (
+                    Conditional::None(NoServerTls::NoClientHello),
+                    EitherIo::Right(io),
+                ),
+            };
+
+            new_accept
+                .new_service((peer, target))
+                .oneshot(io)
+                .err_into::<Error>()
+                .await
+        })
     }
 }
 
@@ -269,51 +256,6 @@ where
     trace!("Could not read TLS ClientHello via buffering");
     let io = EitherIo::Right(PrefixedIo::new(buf.freeze(), io));
     Ok((None, io))
-}
-
-async fn handshake<T>(tls_config: Config, io: T) -> io::Result<(ServerTls, TlsStream<T>)>
-where
-    T: io::AsyncRead + io::AsyncWrite + Unpin,
-{
-    let io = tokio_rustls::TlsAcceptor::from(tls_config)
-        .accept(io)
-        .await?;
-
-    // Determine the peer's identity, if it exist.
-    let client_id = client_identity(&io);
-
-    let negotiated_protocol = io
-        .get_ref()
-        .1
-        .get_alpn_protocol()
-        .map(|b| NegotiatedProtocol(b.into()));
-
-    debug!(client.id = ?client_id, alpn = ?negotiated_protocol, "Accepted TLS connection");
-    let tls = ServerTls::Established {
-        client_id,
-        negotiated_protocol,
-    };
-    Ok((tls, io))
-}
-
-fn client_identity<S>(tls: &TlsStream<S>) -> Option<ClientId> {
-    use webpki::GeneralDNSNameRef;
-
-    let (_io, session) = tls.get_ref();
-    let certs = session.get_peer_certificates()?;
-    let c = certs.first().map(rustls::Certificate::as_ref)?;
-    let end_cert = webpki::EndEntityCert::from(c).ok()?;
-    let dns_names = end_cert.dns_names().ok()?;
-
-    match dns_names.first()? {
-        GeneralDNSNameRef::DNSName(n) => {
-            Some(ClientId(id::Name::from(dns::Name::from(n.to_owned()))))
-        }
-        GeneralDNSNameRef::Wildcard(_) => {
-            // Wildcards can perhaps be handled in a future path...
-            None
-        }
-    }
 }
 
 // === impl ClientId ===

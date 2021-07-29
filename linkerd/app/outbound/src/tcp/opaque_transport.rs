@@ -52,7 +52,7 @@ where
         + svc::Param<Option<SessionProtocol>>,
     S: svc::Service<Connect> + Send + 'static,
     S::Error: Into<Error>,
-    S::Response: io::AsyncWrite + tls::HasNegotiatedProtocol + Send + Unpin,
+    S::Response: io::AsyncWrite + Send + Unpin,
     S::Future: Send + 'static,
 {
     type Response = S::Response;
@@ -304,12 +304,6 @@ mod test {
         #[pin]
         io: tokio_test::io::Mock,
         alpn: Option<tls::NegotiatedProtocolRef<'static>>,
-    }
-
-    impl tls::HasNegotiatedProtocol for Io {
-        fn negotiated_protocol(&self) -> Option<tls::NegotiatedProtocolRef<'_>> {
-            self.alpn
-        }
     }
 
     impl io::AsyncRead for Io {

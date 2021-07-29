@@ -223,10 +223,11 @@ impl Outbound<svc::BoxNewHttp<http::Endpoint>> {
             .push_cache(cache_max_idle_age)
             .push_map_target(detect::allow_timeout)
             .push(svc::BoxNewService::layer())
-            .push(detect::NewDetectService::layer(
-                detect_protocol_timeout,
-                http::DetectHttp::default(),
-            ))
+            .push(detect::NewDetectService::layer(detect::Config {
+                detect: http::DetectHttp::default(),
+                capacity: 1024,
+                timeout: detect_protocol_timeout,
+            }))
             .push(rt.metrics.transport.layer_accept())
             .instrument(|a: &tcp::Accept| info_span!("ingress", orig_dst = %a.orig_dst))
             .push_map_target(|a: T| {

@@ -1280,6 +1280,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "linkerd-rustls"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "linkerd-io",
+ "linkerd-stack",
+ "linkerd-tls",
+ "tokio-rustls",
+ "tracing",
+ "webpki",
+]
+
+[[package]]
 name = "linkerd-service-profiles"
 version = "0.1.0"
 dependencies = [
@@ -1396,11 +1409,9 @@ dependencies = [
  "linkerd-tracing",
  "thiserror",
  "tokio",
- "tokio-rustls",
  "tower",
  "tracing",
  "untrusted",
- "webpki",
 ]
 
 [[package]]

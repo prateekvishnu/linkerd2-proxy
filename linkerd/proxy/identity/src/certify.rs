@@ -205,7 +205,7 @@ impl LocalCrtKey {
         self.id.as_ref()
     }
 
-    pub fn client_config(&self) -> tls::client::Config {
+    pub fn client_config(&self) -> Arc<id::rustls::ClientConfig> {
         if let Some(ref c) = *self.crt_key.borrow() {
             return c.client_config();
         }
@@ -213,23 +213,25 @@ impl LocalCrtKey {
         self.trust_anchors.client_config()
     }
 
-    pub fn server_config(&self) -> tls::server::Config {
+    pub fn server_config(&self) -> Arc<id::rustls::ServerConfig> {
         if let Some(ref c) = *self.crt_key.borrow() {
             return c.server_config();
         }
 
-        tls::server::empty_config()
+        Arc::new(id::rustls::ServerConfig::new(
+            id::rustls::NoClientAuth::new(),
+        ))
     }
 }
 
-impl Param<tls::client::Config> for LocalCrtKey {
-    fn param(&self) -> tls::client::Config {
+impl Param<tls::ClientConfig> for LocalCrtKey {
+    fn param(&self) -> tls::ClientConfig {
         self.client_config()
     }
 }
 
-impl Param<tls::server::Config> for LocalCrtKey {
-    fn param(&self) -> tls::server::Config {
+impl Param<tls::ServerConfig> for LocalCrtKey {
+    fn param(&self) -> tls::ServerConfig {
         self.server_config()
     }
 }
