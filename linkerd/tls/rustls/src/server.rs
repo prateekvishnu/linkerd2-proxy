@@ -1,3 +1,4 @@
+use linkerd_identity as id;
 use linkerd_io as io;
 use linkerd_stack as svc;
 use linkerd_tls as tls;

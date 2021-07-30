@@ -19,7 +19,7 @@ impl Name {
     }
 
     pub fn without_trailing_dot(&self) -> &str {
-        self.as_ref().trim_end_matches('.')
+        AsRef::<str>::as_ref(&self.0).trim_end_matches('.')
     }
 }
 
@@ -37,18 +37,18 @@ impl fmt::Display for Name {
     }
 }
 
-impl From<webpki::DNSName> for Name {
-    fn from(n: webpki::DNSName) -> Self {
-        Name(n)
-    }
-}
+// impl From<webpki::DNSName> for Name {
+//     fn from(n: webpki::DNSName) -> Self {
+//         Name(n)
+//     }
+// }
 
 impl<'a> TryFrom<&'a [u8]> for Name {
     type Error = InvalidName;
     fn try_from(s: &[u8]) -> Result<Self, Self::Error> {
         webpki::DNSNameRef::try_from_ascii(s)
             .map_err(|_invalid| InvalidName)
-            .map(|r| r.to_owned().into())
+            .map(|r| Self(r.to_owned()))
     }
 }
 
@@ -59,21 +59,21 @@ impl<'a> std::str::FromStr for Name {
     }
 }
 
-impl From<Name> for webpki::DNSName {
-    fn from(Name(name): Name) -> webpki::DNSName {
-        name
-    }
-}
+// impl From<Name> for webpki::DNSName {
+//     fn from(Name(name): Name) -> webpki::DNSName {
+//         name
+//     }
+// }
 
-impl<'t> From<&'t Name> for webpki::DNSNameRef<'t> {
-    fn from(Name(ref name): &'t Name) -> webpki::DNSNameRef<'t> {
-        name.as_ref()
-    }
-}
+// impl<'t> From<&'t Name> for webpki::DNSNameRef<'t> {
+//     fn from(Name(ref name): &'t Name) -> webpki::DNSNameRef<'t> {
+//         name.as_ref()
+//     }
+// }
 
 impl AsRef<str> for Name {
     fn as_ref(&self) -> &str {
-        <webpki::DNSName as AsRef<str>>::as_ref(&self.0)
+        AsRef::<str>::as_ref(&self.0)
     }
 }
 

@@ -1,11 +1,11 @@
 mod client_hello;
 
-use crate::{LocalId, NegotiatedProtocol, ServerId};
+use crate::NegotiatedProtocol;
 use bytes::BytesMut;
 use futures::prelude::*;
 use linkerd_conditional::Conditional;
 use linkerd_dns_name::Name;
-use linkerd_error::Error;
+use linkerd_error::{Error, Result};
 use linkerd_identity as id;
 use linkerd_io::{self as io, AsyncReadExt, EitherIo, PrefixedIo};
 use linkerd_stack::{self as svc, ExtractParam, NewService, ServiceExt};
@@ -21,9 +21,16 @@ use tracing::{debug, trace, warn};
 
 #[derive(Clone)]
 pub struct Config<T> {
-    pub id: LocalId,
+    pub id: id::LocalId,
     pub timeout: Duration,
     pub tls: T,
+}
+
+#[async_trait::async_trait]
+pub trait Terminate<I: io::AsyncRead + io::AsyncWrite + Send + Unpin> {
+    type Io: io::AsyncRead + io::AsyncWrite + Send + Unpin;
+
+    async fn terminate(&self, io: I) -> Result<(Terminated, Self::Io)>;
 }
 
 /*
@@ -38,16 +45,17 @@ pub fn empty_config() -> ServerConfig {
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ClientId(pub Name);
 
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct Terminated {
+    id: Option<ClientId>,
+    negotiated_protocol: Option<NegotiatedProtocol>,
+}
+
 /// Indicates a serverside connection's TLS status.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum ServerTls {
-    Established {
-        client_id: Option<ClientId>,
-        negotiated_protocol: Option<NegotiatedProtocol>,
-    },
-    Passthru {
-        sni: ServerId,
-    },
+    Terminated(Terminated),
+    Passthru { sni: id::ServerId },
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -80,7 +88,7 @@ pub struct ServerTlsTimeoutError(());
 pub struct NewDetectTls<P, L, N> {
     params: P,
     inner: N,
-    _tls: std::marker::PhantomData<fn() -> L>,
+    _marker: std::marker::PhantomData<fn() -> L>,
 }
 
 #[derive(Clone)]
@@ -103,7 +111,7 @@ impl<P, L, N> NewDetectTls<P, L, N> {
         Self {
             params,
             inner,
-            _tls: std::marker::PhantomData,
+            _marker: std::marker::PhantomData,
         }
     }
 
@@ -132,16 +140,14 @@ where
     }
 }
 
-impl<I, T, L, LIo, N, NSvc> svc::Service<I> for DetectTls<T, L, N>
+impl<I, T, L, N, NSvc> svc::Service<I> for DetectTls<T, L, N>
 where
     I: io::Peek + io::AsyncRead + io::AsyncWrite + Send + Sync + Unpin + 'static,
     T: Clone + Send + 'static,
-    L: svc::Service<DetectIo<I>, Response = (ServerTls, LIo)> + Clone + Send + 'static,
-    L::Error: Into<Error>,
-    L::Future: Send,
-    LIo: io::AsyncRead + io::AsyncWrite + Send + Sync + Unpin + 'static,
+    L: Terminate<DetectIo<I>> + Clone + Send + Sync + 'static,
+    L::Io: io::AsyncRead + io::AsyncWrite + Send + Sync + Unpin + 'static,
     N: NewService<(ConditionalServerTls, T), Service = NSvc> + Clone + Send + 'static,
-    NSvc: svc::Service<EitherIo<LIo, DetectIo<I>>> + Send + 'static,
+    NSvc: svc::Service<EitherIo<L::Io, DetectIo<I>>> + Send + 'static,
     NSvc::Error: Into<Error>,
     NSvc::Future: Send,
 {
@@ -157,7 +163,7 @@ where
         let target = self.target.clone();
         let mut new_accept = self.inner.clone();
 
-        let (LocalId(local_id), timeout, tls) = match self.config.as_ref() {
+        let (id::LocalId(local_id), timeout, tls) = match self.config.as_ref() {
             Some(Config { id, timeout, tls }) => (id.clone(), *timeout, tls.clone()),
             None => {
                 let peer = Conditional::None(NoServerTls::Disabled);
@@ -176,10 +182,11 @@ where
 
             let (peer, io) = match sni {
                 // If we detected an SNI matching this proxy, terminate TLS.
-                Some(ServerId(id)) if id == local_id => {
+                Some(id::ServerId(id)) if id == local_id => {
                     trace!("Identified local SNI");
-                    let (peer, io) = tls.oneshot(io).err_into::<Error>().await?;
-                    (Conditional::Some(peer), EitherIo::Left(io))
+                    let (peer, io) = tls.terminate(io).err_into::<Error>().await?;
+                    let peer = Conditional::Some(ServerTls::Terminated(peer));
+                    (peer, EitherIo::Left(io))
                 }
                 // If we detected another SNI, continue proxying the
                 // opaque stream.
@@ -205,7 +212,7 @@ where
 }
 
 /// Peek or buffer the provided stream to determine an SNI value.
-async fn detect_sni<I>(mut io: I) -> io::Result<(Option<ServerId>, DetectIo<I>)>
+async fn detect_sni<I>(mut io: I) -> io::Result<(Option<id::ServerId>, DetectIo<I>)>
 where
     I: io::Peek + io::AsyncRead + io::AsyncWrite + Send + Sync + Unpin,
 {
@@ -300,7 +307,7 @@ impl fmt::Display for NoServerTls {
             Self::Disabled => write!(f, "disabled"),
             Self::Loopback => write!(f, "loopback"),
             Self::PortSkipped => write!(f, "port_skipped"),
-            Self::NoClientHello => write!(f, "no_tls_from_remote"),
+            Self::NoClientHello => write!(f, "no_marker_from_remote"),
         }
     }
 }
@@ -330,8 +337,8 @@ mod tests {
             .await
             .expect("SNI detection must not fail");
 
-        let identity = Name::from_str("example.com").unwrap();
-        assert_eq!(sni, Some(ServerId(identity)));
+        let identity = id::Id::from_str("example.com").unwrap();
+        assert_eq!(sni, Some(id::ServerId(identity)));
 
         match io {
             EitherIo::Left(_) => panic!("Detected IO should be buffered"),

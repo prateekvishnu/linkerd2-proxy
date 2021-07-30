@@ -1,4 +1,3 @@
-use crate::ServerId;
 use linkerd_identity as id;
 use std::convert::TryFrom;
 use tracing::trace;
@@ -22,20 +21,20 @@ pub struct Incomplete;
 /// This assumes that the ClientHello is small and is sent in a single TLS
 /// record, which is what all reasonable implementations do. (If they were not
 /// to, they wouldn't interoperate with picky servers.)
-pub fn parse_sni(input: &[u8]) -> Result<Option<ServerId>, Incomplete> {
+pub fn parse_sni(input: &[u8]) -> Result<Option<id::ServerId>, Incomplete> {
     let r = untrusted::Input::from(input).read_all(untrusted::EndOfInput, |input| {
         let r = extract_sni(input);
         input.skip_to_end(); // Ignore anything after what we parsed.
         r
     });
     match r {
-        Ok(Some(sni)) => {
-            let sni = id::Name::try_from(sni.as_slice_less_safe())
-                .ok()
-                .map(ServerId);
-            trace!(?sni, "parse_sni: parsed correctly up to SNI");
-            Ok(sni)
-        }
+        Ok(Some(sni)) => match id::Id::try_from(sni.as_slice_less_safe()) {
+            Ok(id) => {
+                trace!(%id, "parse_sni: parsed correctly up to SNI");
+                Ok(Some(id::ServerId(id)))
+            }
+            Err(_) => Ok(None),
+        },
         Ok(None) => {
             trace!("parse_sni: failed to parse up to SNI");
             Ok(None)
@@ -202,7 +201,7 @@ mod tests {
     #[test]
     fn check_all_prefixes() {
         let input = include_bytes!("testdata/example-com-client-hello.bin");
-        let identity = id::Name::from_str("example.com").unwrap();
+        let identity = id::Id::from_str("example.com").unwrap();
 
         let mut i = 0;
         while let Err(Incomplete) = parse_sni(&input[..i]) {
@@ -211,7 +210,10 @@ mod tests {
 
         // The same result will be returned for all longer prefixes.
         for i in i..input.len() {
-            assert_eq!(Ok(Some(ServerId(identity.clone()))), parse_sni(&input[..i]))
+            assert_eq!(
+                Ok(Some(id::ServerId(identity.clone()))),
+                parse_sni(&input[..i])
+            )
         }
     }
 }

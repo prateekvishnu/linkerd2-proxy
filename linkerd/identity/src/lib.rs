@@ -2,26 +2,156 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::inconsistent_struct_constructor)]
 
-pub use ring::error::KeyRejected;
-use ring::rand;
-use ring::signature::EcdsaKeyPair;
-use std::{convert::TryFrom, fmt, fs, io, str::FromStr, sync::Arc, time::SystemTime};
-use thiserror::Error;
-pub use tokio_rustls::rustls;
-use tracing::{debug, warn};
+// #[cfg(any(test, feature = "test-util"))]
+// pub mod test_util;
 
-#[cfg(any(test, feature = "test-util"))]
-pub mod test_util;
-
+use linkerd_dns_name as dns;
 pub use linkerd_dns_name::InvalidName;
+use linkerd_error::Result;
+use std::{convert::TryFrom, fmt, str::FromStr};
+
+// pub use ring::error::KeyRejected;
+// use ring::{rand, signature::EcdsaKeyPair};
+// use std::{convert::TryFrom, fmt, fs, io, str::FromStr, sync::Arc, time::SystemTime};
+// pub use tokio_rustls::rustls;
+// use tracing::{debug, warn};
+
+/// An endpoint's identity.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct Id(dns::Name);
+
+/// A newtype for local identities.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct LocalId(pub Id);
+
+/// A newtype for remote client identities.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct ClientId(pub Id);
+
+/// A newtype for remote server identities.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct ServerId(pub Id);
+
+// === impl Id ===
+
+impl Id {
+    pub fn name(&self) -> &dns::Name {
+        &self.0
+    }
+}
+
+impl From<Id> for dns::Name {
+    fn from(Id(name): Id) -> Self {
+        name
+    }
+}
+
+impl FromStr for Id {
+    type Err = InvalidName;
+
+    #[inline]
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::try_from(s.as_bytes())
+    }
+}
+
+impl TryFrom<&[u8]> for Id {
+    type Error = InvalidName;
+
+    #[inline]
+    fn try_from(s: &[u8]) -> Result<Self, Self::Error> {
+        if s.last() == Some(&b'.') {
+            return Err(InvalidName); // SNI hostnames are implicitly absolute.
+        }
+
+        dns::Name::try_from(s).map(Self)
+    }
+}
+
+impl TryFrom<&str> for Id {
+    type Error = InvalidName;
+
+    #[inline]
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        TryFrom::<&[u8]>::try_from(s.as_ref()).map(Self)
+    }
+}
+
+impl TryFrom<dns::Name> for Id {
+    type Error = InvalidName;
+
+    #[inline]
+    fn try_from(s: dns::Name) -> Result<Self, Self::Error> {
+        TryFrom::<&[u8]>::try_from(s.as_ref().as_bytes()).map(Self)
+    }
+}
+
+impl fmt::Display for Id {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+// === impl LocalId ===
+
+impl From<Id> for LocalId {
+    fn from(n: Id) -> Self {
+        Self(n)
+    }
+}
+
+impl fmt::Display for LocalId {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+// === impl ClientId ===
+
+impl From<Id> for ClientId {
+    fn from(n: Id) -> Self {
+        Self(n)
+    }
+}
+
+impl fmt::Display for ClientId {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+// === impl ServerId ===
+
+impl From<Id> for ServerId {
+    fn from(n: Id) -> Self {
+        Self(n)
+    }
+}
+
+impl fmt::Display for ServerId {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/*
+
+/// PEM-encoded X.509 trust anchor (CA) certificates.
+#[derive(Clone, Debug)]
+pub struct TrustAnchorsPem(pub Vec<Vec<u8>>);
 
 /// A DER-encoded X.509 certificate signing request.
 #[derive(Clone, Debug)]
-pub struct Csr(Arc<Vec<u8>>);
+pub struct CsrDer(pub Vec<u8>);
 
-/// An endpoint's identity.
-#[derive(Clone, Eq, PartialEq, Hash)]
-pub struct Name(Arc<linkerd_dns_name::Name>);
+/// A PEM-encoded private key. The key type is not specified.
+#[derive(Clone, Debug)]
+pub struct KeyPem(pub Vec<u8>);
+
 
 #[derive(Clone, Debug)]
 pub struct Key(Arc<EcdsaKeyPair>);
@@ -50,27 +180,23 @@ pub struct CrtKey {
     server_config: Arc<rustls::ServerConfig>,
 }
 
-struct CertResolver(rustls::sign::CertifiedKey);
+// struct CertResolver(rustls::sign::CertifiedKey);
 
-#[derive(Clone, Debug, Error)]
-#[error(transparent)]
-pub struct InvalidCrt(rustls::TLSError);
+// #[derive(Clone, Debug, Error)]
+// #[error(transparent)]
+// pub struct InvalidCrt(rustls::TLSError);
 
-/// A newtype for local server identities.
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub struct LocalId(pub Name);
-
-// These must be kept in sync:
-static SIGNATURE_ALG_RING_SIGNING: &ring::signature::EcdsaSigningAlgorithm =
-    &ring::signature::ECDSA_P256_SHA256_ASN1_SIGNING;
-const SIGNATURE_ALG_RUSTLS_SCHEME: rustls::SignatureScheme =
-    rustls::SignatureScheme::ECDSA_NISTP256_SHA256;
-const SIGNATURE_ALG_RUSTLS_ALGORITHM: rustls::internal::msgs::enums::SignatureAlgorithm =
-    rustls::internal::msgs::enums::SignatureAlgorithm::ECDSA;
-const TLS_VERSIONS: &[rustls::ProtocolVersion] = &[
-    rustls::ProtocolVersion::TLSv1_2,
-    rustls::ProtocolVersion::TLSv1_3,
-];
+// // These must be kept in sync:
+// static SIGNATURE_ALG_RING_SIGNING: &ring::signature::EcdsaSigningAlgorithm =
+//     &ring::signature::ECDSA_P256_SHA256_ASN1_SIGNING;
+// const SIGNATURE_ALG_RUSTLS_SCHEME: rustls::SignatureScheme =
+//     rustls::SignatureScheme::ECDSA_NISTP256_SHA256;
+// const SIGNATURE_ALG_RUSTLS_ALGORITHM: rustls::internal::msgs::enums::SignatureAlgorithm =
+//     rustls::internal::msgs::enums::SignatureAlgorithm::ECDSA;
+// const TLS_VERSIONS: &[rustls::ProtocolVersion] = &[
+//     rustls::ProtocolVersion::TLSv1_2,
+//     rustls::ProtocolVersion::TLSv1_3,
+// ];
 
 // === impl Csr ===
 
@@ -127,44 +253,6 @@ impl rustls::sign::Signer for Signer {
 
     fn get_scheme(&self) -> rustls::SignatureScheme {
         SIGNATURE_ALG_RUSTLS_SCHEME
-    }
-}
-
-// === impl Name ===
-
-impl From<linkerd_dns_name::Name> for Name {
-    fn from(n: linkerd_dns_name::Name) -> Self {
-        Name(Arc::new(n))
-    }
-}
-
-impl<'t> From<&'t LocalId> for webpki::DNSNameRef<'t> {
-    fn from(LocalId(ref name): &'t LocalId) -> webpki::DNSNameRef<'t> {
-        name.into()
-    }
-}
-
-impl FromStr for Name {
-    type Err = InvalidName;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.as_bytes().last() == Some(&b'.') {
-            return Err(InvalidName); // SNI hostnames are implicitly absolute.
-        }
-
-        linkerd_dns_name::Name::from_str(s).map(|n| Name(Arc::new(n)))
-    }
-}
-
-impl TryFrom<&[u8]> for Name {
-    type Error = InvalidName;
-
-    fn try_from(s: &[u8]) -> Result<Self, Self::Error> {
-        if s.last() == Some(&b'.') {
-            return Err(InvalidName); // SNI hostnames are implicitly absolute.
-        }
-
-        linkerd_dns_name::Name::try_from(s).map(|n| Name(Arc::new(n)))
     }
 }
 
@@ -429,32 +517,6 @@ impl rustls::ResolvesServerCert for CertResolver {
     }
 }
 
-// === impl LocalId ===
-
-impl From<Name> for LocalId {
-    fn from(n: Name) -> Self {
-        Self(n)
-    }
-}
-
-impl From<LocalId> for Name {
-    fn from(LocalId(name): LocalId) -> Name {
-        name
-    }
-}
-
-impl AsRef<Name> for LocalId {
-    fn as_ref(&self) -> &Name {
-        &self.0
-    }
-}
-
-impl fmt::Display for LocalId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::test_util::*;
@@ -493,3 +555,4 @@ mod tests {
         assert!(s.validate().is_err(), "identity should not be valid");
     }
 }
+ */

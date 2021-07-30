@@ -7,8 +7,9 @@ use futures::{
 };
 use linkerd_conditional::Conditional;
 use linkerd_dns_name::{InvalidName, Name};
+use linkerd_error::Result;
 use linkerd_io as io;
-use linkerd_stack::{self as svc, Param, ServiceExt};
+use linkerd_stack::{self as svc, Param};
 use std::{
     fmt,
     future::Future,
@@ -18,11 +19,18 @@ use std::{
 };
 use tracing::{debug, trace};
 
+#[async_trait::async_trait]
+pub trait Initiate<I: io::AsyncRead + io::AsyncWrite + Send + Unpin> {
+    type Io: io::AsyncRead + io::AsyncWrite + Send + Unpin;
+
+    async fn initiate(&self, tls: &ClientTls, io: I) -> io::Result<Connected<Self::Io>>;
+}
+
 /// A newtype for target server identities.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ServerId(pub Name);
 
-/// A stack paramter that configures a `Client` to establish a TLS connection.
+/// A stack parameter that configures a `Client` to establish a TLS connection.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ClientTls {
     pub server_id: ServerId,
@@ -61,8 +69,8 @@ pub struct Client<L, C> {
 }
 
 type Connected<I> = (Option<NegotiatedProtocol>, I);
-type Connect<F, I, J> = MapOk<F, fn(I) -> Connected<J>>;
-type Handshake<I> = Pin<Box<dyn Future<Output = io::Result<Connected<I>>> + Send + 'static>>;
+type ConnectFut<F, I, J> = MapOk<F, fn(I) -> Connected<J>>;
+type HandshakeFut<I> = Pin<Box<dyn Future<Output = io::Result<Connected<I>>> + Send + 'static>>;
 
 // === impl Client ===
 
@@ -75,24 +83,20 @@ impl<L: Clone, C> Client<L, C> {
     }
 }
 
-impl<T, L, LIo, C> svc::Service<T> for Client<L, C>
+impl<T, L, C> svc::Service<T> for Client<L, C>
 where
     T: Param<ConditionalClientTls>,
     C: svc::Service<T, Error = io::Error>,
     C::Response: io::AsyncRead + io::AsyncWrite + Send + Unpin,
     C::Future: Send + 'static,
-    L: svc::Service<(ClientTls, C::Response), Response = Connected<LIo>, Error = io::Error>
-        + Clone
-        + Send
-        + 'static,
-    L::Future: Send + 'static,
-    LIo: io::AsyncRead + io::AsyncWrite + Send + Unpin,
+    L: Initiate<C::Response> + Clone + Send + Sync + 'static,
+    L::Io: io::AsyncRead + io::AsyncWrite + Send + Unpin,
 {
-    type Response = Connected<io::EitherIo<C::Response, LIo>>;
+    type Response = Connected<io::EitherIo<C::Response, L::Io>>;
     type Error = io::Error;
     type Future = Either<
-        Connect<C::Future, C::Response, io::EitherIo<C::Response, LIo>>,
-        Handshake<io::EitherIo<C::Response, LIo>>,
+        ConnectFut<C::Future, C::Response, io::EitherIo<C::Response, L::Io>>,
+        HandshakeFut<io::EitherIo<C::Response, L::Io>>,
     >;
 
     #[inline]
@@ -123,11 +127,12 @@ where
         debug!(server.id = %client_tls.server_id, "Initiating TLS connection");
         Either::Right(Box::pin(async move {
             let tcp = connect.await?;
-            let (alpn, tls): Connected<LIo> = tls.oneshot((client_tls, tcp)).await?;
+            let (alpn, tls): Connected<L::Io> = tls.initiate(&client_tls, tcp).await?;
             if let Some(alpn) = alpn.as_ref() {
                 debug!(?alpn);
             }
-            let conn: Connected<io::EitherIo<C::Response, LIo>> = (alpn, io::EitherIo::Right(tls));
+            let conn: Connected<io::EitherIo<C::Response, L::Io>> =
+                (alpn, io::EitherIo::Right(tls));
             Ok(conn)
         }))
     }

@@ -1004,13 +1004,12 @@ dependencies = [
 name = "linkerd-identity"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "linkerd-dns-name",
- "ring",
+ "linkerd-error",
+ "linkerd-stack",
  "thiserror",
- "tokio-rustls",
  "tracing",
- "untrusted",
- "webpki",
 ]
 
 [[package]]
