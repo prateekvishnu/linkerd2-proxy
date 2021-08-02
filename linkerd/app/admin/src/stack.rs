@@ -115,11 +115,7 @@ impl Config {
                 },
             )
             .push(svc::BoxNewService::layer())
-            .push(detect::NewDetectService::layer(detect::Config {
-                detect: http::DetectHttp::default(),
-                capacity: 1024,
-                timeout: DETECT_TIMEOUT,
-            }))
+            .push(detect::NewDetectService::layer(detect::Config::<http::DetectHttp>::from_timeout(DETECT_TIMEOUT)))
             .push(metrics.transport.layer_accept())
             .push_map_target(|(tls, addrs): (tls::ConditionalServerTls, B::Addrs)| {
                 // TODO this should use an admin-specific target type.

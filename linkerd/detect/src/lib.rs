@@ -1,6 +1,5 @@
 #![deny(warnings, rust_2018_idioms)]
 #![forbid(unsafe_code)]
-#![allow(clippy::inconsistent_struct_constructor)]
 
 use bytes::BytesMut;
 use linkerd_error::Error;
@@ -58,6 +57,20 @@ pub fn allow_timeout<P, T>((p, t): (DetectResult<P>, T)) -> (Option<P>, T) {
         Err(e) => {
             info!("Continuing after timeout: {}", e);
             (None, t)
+        }
+    }
+}
+
+// === impl Config ===
+
+impl<D: Default> Config<D> {
+    const DEFAULT_CAPACITY: usize = 1024;
+
+    pub fn from_timeout(timeout: time::Duration) -> Self {
+        Self {
+            detect: D::default(),
+            capacity: Self::DEFAULT_CAPACITY,
+            timeout,
         }
     }
 }
@@ -128,7 +141,7 @@ where
         let target = self.target.clone();
         let mut inner = self.inner.clone();
         Box::pin(async move {
-            trace!("Starting protocol detection");
+            trace!(%capacity, ?timeout, "Starting protocol detection");
             let t0 = time::Instant::now();
 
             let mut buf = BytesMut::with_capacity(capacity);
