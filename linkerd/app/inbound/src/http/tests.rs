@@ -1,6 +1,5 @@
 use super::test_util::{
-    build_server, default_config, hello_server, http_util, runtime,
-    support::{self, profile},
+    self as support, build_server, default_config, hello_server, http_util, profile, runtime,
     Target,
 };
 

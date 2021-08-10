@@ -14,7 +14,7 @@ fn trace_labels() -> std::collections::HashMap<String, String> {
 #[cfg(any(test, fuzzing))]
 pub(crate) mod test_util {
     pub use crate::test_util::{
-        support::{connect::Connect, http_util, profile, resolver},
+        support::{connect::Connect, *},
         *,
     };
     use crate::{Config, Inbound};
@@ -27,7 +27,6 @@ pub(crate) mod test_util {
         transport::{ClientAddr, OrigDstAddr, Remote, ServerAddr},
         ProxyRuntime,
     };
-    use support::*;
 
     #[derive(Clone, Debug)]
     pub(crate) struct Target(http::Version);
@@ -132,8 +131,7 @@ pub(crate) mod test_util {
 #[cfg(fuzzing)]
 pub mod fuzz {
     use super::test_util::{
-        build_server, default_config, hello_server, http_util, runtime,
-        support::{self, profile},
+        self as support, build_server, default_config, hello_server, http_util, profile, runtime,
         Target,
     };
     use hyper::{client::conn::Builder as ClientBuilder, Body, Request};
