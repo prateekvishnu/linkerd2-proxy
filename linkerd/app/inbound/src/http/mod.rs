@@ -12,7 +12,7 @@ fn trace_labels() -> std::collections::HashMap<String, String> {
 
 /// Test-support helpers used by both the stack tests and the fuzz logic.
 #[cfg(any(test, fuzzing))]
-pub(crate) mod test_util {
+pub(crate) mod support {
     pub use crate::test_util::{
         support::{connect::Connect, *},
         *,
@@ -130,9 +130,8 @@ pub(crate) mod test_util {
 
 #[cfg(fuzzing)]
 pub mod fuzz {
-    use super::test_util::{
-        self as support, build_server, default_config, hello_server, http_util, profile, runtime,
-        Target,
+    use super::support::{
+        build_server, default_config, hello_server, http_util, profile, runtime, Target,
     };
     use hyper::{client::conn::Builder as ClientBuilder, Body, Request};
     use libfuzzer_sys::arbitrary::Arbitrary;

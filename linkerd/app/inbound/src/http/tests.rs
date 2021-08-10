@@ -1,6 +1,5 @@
-use super::test_util::{
-    self as support, build_server, default_config, hello_server, http_util, profile, runtime,
-    Target,
+use super::support::{
+    self, build_server, default_config, hello_server, http_util, profile, runtime, Target,
 };
 
 use hyper::{client::conn::Builder as ClientBuilder, Body, Request};
