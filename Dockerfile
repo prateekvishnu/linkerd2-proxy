@@ -63,6 +63,9 @@ RUN --mount=type=cache,target=/var/lib/apt/lists \
     apt update && apt install -y heaptrack
 
 WORKDIR /linkerd
+COPY --from=ghcr.io/linkerd/proxy:edge-21.9.2 /usr/bin/linkerd2-proxy-run /usr/bin/linkerd2-proxy-run
+COPY --from=ghcr.io/linkerd/proxy:edge-21.9.2 /usr/lib/linkerd/linkerd-await /usr/lib/linkerd/linkerd-await
+COPY --from=ghcr.io/linkerd/proxy:edge-21.9.2 /usr/lib/linkerd/linkerd2-proxy-identity  /usr/lib/linkerd/linkerd2-proxy-identity
 COPY --from=build /out/linkerd2-proxy /usr/lib/linkerd/linkerd2-proxy.bin
 COPY ./heaptrack-proxy.sh /usr/lib/linkerd/linkerd2-proxy
 ENV LINKERD2_PROXY_LOG=warn,linkerd=info
