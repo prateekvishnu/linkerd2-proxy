@@ -70,4 +70,4 @@ RUN if [ -n "$SKIP_IDENTITY_WRAPPER" ] ; then \
   rm -f /usr/bin/linkerd2-proxy-run && \
   ln /usr/lib/linkerd/linkerd2-proxy /usr/bin/linkerd2-proxy-run ; \
   fi
-# Inherits the ENTRYPOINT from the runtime image.
+ENTRYPOINT ["/usr/bin/linkerd2-proxy-run"]
