@@ -65,12 +65,8 @@ RUN --mount=type=cache,target=/var/lib/apt/lists \
 WORKDIR /linkerd
 COPY --from=ghcr.io/linkerd/proxy:edge-21.9.2 /usr/bin/linkerd2-proxy-run /usr/bin/linkerd2-proxy-run
 COPY --from=ghcr.io/linkerd/proxy:edge-21.9.2 /usr/lib/linkerd/linkerd-await /usr/lib/linkerd/linkerd-await
-COPY --from=ghcr.io/linkerd/proxy:edge-21.9.2 /usr/lib/linkerd/linkerd2-proxy-identity  /usr/lib/linkerd/linkerd2-proxy-identity
+COPY --from=ghcr.io/linkerd/proxy:edge-21.9.2 /usr/lib/linkerd/linkerd2-proxy-identity /usr/lib/linkerd/linkerd2-proxy-identity
 COPY --from=build /out/linkerd2-proxy /usr/lib/linkerd/linkerd2-proxy.bin
 COPY ./heaptrack-proxy.sh /usr/lib/linkerd/linkerd2-proxy
 ENV LINKERD2_PROXY_LOG=warn,linkerd=info
-RUN if [ -n "$SKIP_IDENTITY_WRAPPER" ] ; then \
-  rm -f /usr/bin/linkerd2-proxy-run && \
-  ln /usr/lib/linkerd/linkerd2-proxy /usr/bin/linkerd2-proxy-run ; \
-  fi
-ENTRYPOINT ["/usr/bin/linkerd2-proxy-run"]
+ENTRYPOINT ["/usr/lib/linkerd/linkerd2-proxy-identity"]
