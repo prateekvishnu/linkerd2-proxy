@@ -21,7 +21,7 @@ ARG RUST_IMAGE=rust:1.55.0-buster
 
 # Use an arbitrary ~recent edge release image to get the proxy
 # identity-initializing and linkerd-await wrappers.
-ARG RUNTIME_IMAGE=ghcr.io/linkerd/proxy:edge-21.4.5
+ARG RUNTIME_IMAGE=debian:buster-slim
 
 # Build the proxy, leveraging (new, experimental) cache mounting.
 #
@@ -58,8 +58,13 @@ FROM $RUNTIME_IMAGE as runtime
 # CSR and key generation.
 ARG SKIP_IDENTITY_WRAPPER
 
+RUN --mount=type=cache,target=/var/lib/apt/lists \
+    --mount=type=cache,target=/var/tmp \
+    apt update && apt install -y heaptrack
+
 WORKDIR /linkerd
-COPY --from=build /out/linkerd2-proxy /usr/lib/linkerd/linkerd2-proxy
+COPY --from=build /out/linkerd2-proxy /usr/lib/linkerd/linkerd2-proxy.bin
+COPY ./heaptrack-proxy.sh /usr/lib/linkerd/linkerd2-proxy
 ENV LINKERD2_PROXY_LOG=warn,linkerd=info
 RUN if [ -n "$SKIP_IDENTITY_WRAPPER" ] ; then \
   rm -f /usr/bin/linkerd2-proxy-run && \
