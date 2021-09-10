@@ -21,7 +21,7 @@ ARG RUST_IMAGE=rust:1.55.0-buster
 
 # Use an arbitrary ~recent edge release image to get the proxy
 # identity-initializing and linkerd-await wrappers.
-ARG RUNTIME_IMAGE=debian:buster-slim
+ARG RUNTIME_IMAGE=debian:bullseye-slim
 
 # Build the proxy, leveraging (new, experimental) cache mounting.
 #
