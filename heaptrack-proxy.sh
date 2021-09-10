@@ -1,2 +1,5 @@
 #!/bin/sh
-/usr/bin/heaptrack /usr/lib/linkerd/linkerd2-proxy.bin
+
+set -eu
+
+/usr/bin/heaptrack -o /var/run/heaptrack/proxy /usr/lib/linkerd/linkerd2-proxy.bin
