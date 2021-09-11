@@ -70,7 +70,7 @@ debug = false
 debug = false
 
 [profile.release]
-debug = false
+debug = true
 lto = true
 
 [patch.crates-io]
