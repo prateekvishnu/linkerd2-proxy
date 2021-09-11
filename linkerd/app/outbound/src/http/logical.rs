@@ -104,7 +104,6 @@ impl<E> Outbound<E> {
                 // concrete address.
                 .instrument(|c: &Concrete| debug_span!("concrete", addr = %c.resolve))
                 .push_map_target(Concrete::from)
-                .push(svc::BoxNewService::layer())
                 // Distribute requests over a distribution of balancers via a
                 // traffic split.
                 //

@@ -231,7 +231,6 @@ impl<S> Inbound<S> {
                 )
                 .instrument(|_: &_| debug_span!("tcp"))
                 .push(svc::BoxNewService::layer())
-                .check_new::<T>()
         })
     }
 }

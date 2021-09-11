@@ -92,7 +92,6 @@ where
                 )
                 .into_new_service()
                 .push_map_target(Concrete::from)
-                .push(svc::BoxNewService::layer())
                 .check_new_service::<(ConcreteAddr, Logical), I>()
                 .push(profiles::split::layer())
                 .push_on_service(

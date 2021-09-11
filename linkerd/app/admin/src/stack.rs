@@ -147,7 +147,6 @@ impl Config {
                     }
                 },
             )
-            .push(svc::BoxNewService::layer())
             .push(detect::NewDetectService::layer(detect::Config::<http::DetectHttp>::from_timeout(DETECT_TIMEOUT)))
             .push(transport::metrics::NewServer::layer(metrics.proxy.transport))
             .push_map_target(move |(tls, addrs): (tls::ConditionalServerTls, B::Addrs)| {
@@ -158,7 +157,6 @@ impl Config {
                     policy: policy.clone(),
                 }
             })
-            .push(svc::BoxNewService::layer())
             .push(tls::NewDetectTls::layer(TlsParams {
                 identity,
             }))

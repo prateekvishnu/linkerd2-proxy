@@ -220,7 +220,6 @@ impl<N> Inbound<N> {
                 // Build a ClientInfo target for each accepted connection. Refuse the
                 // connection if it doesn't include an mTLS identity.
                 .push_request_filter(ClientInfo::try_from)
-                .push(svc::BoxNewService::layer())
                 .push(tls::NewDetectTls::layer(TlsParams {
                     timeout: tls::server::Timeout(detect_timeout),
                     identity: rt.identity.clone().map(WithTransportHeaderAlpn),

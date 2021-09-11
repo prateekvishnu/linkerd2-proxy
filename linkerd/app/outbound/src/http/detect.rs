@@ -50,10 +50,8 @@ impl<N> Outbound<N> {
                     tcp.push_on_service(svc::MapTargetLayer::new(io::EitherIo::Right))
                         .into_inner(),
                 ))
-                .push_on_service(svc::BoxService::layer())
                 .check_new_service::<(Option<http::Version>, T), _>()
                 .push_map_target(detect::allow_timeout)
-                .push(svc::BoxNewService::layer())
                 .push(detect::NewDetectService::layer(config.proxy.detect_http()))
                 .push_switch(
                     // When the target is marked as as opaque, we skip HTTP

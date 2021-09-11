@@ -214,8 +214,7 @@ where
             svc::layers()
                 .push(http::Retain::layer())
                 .push(http::BoxResponse::layer()),
-        )
-        .push(svc::BoxNewService::layer());
+        );
 
     // When handling gateway connections from older clients that do not
     // support the transport header, do protocol detection and route requests
@@ -233,7 +232,6 @@ where
         .push_http_server()
         .into_stack()
         .push(svc::Filter::<ClientInfo, _>::layer(HttpLegacy::try_from))
-        .push(svc::BoxNewService::layer())
         .push(detect::NewDetectService::layer(
             inbound.config().proxy.detect_http(),
         ));
@@ -252,7 +250,6 @@ where
         .push_http_server()
         .into_stack()
         .push_on_service(svc::BoxService::layer())
-        .push(svc::BoxNewService::layer())
         .push_switch(
             |gth: GatewayTransportHeader| match gth.protocol {
                 Some(proto) => Ok(svc::Either::A(HttpTransportHeader {
@@ -270,7 +267,6 @@ where
                 .push(inbound.authorize_tcp())
                 .check_new_service::<GatewayTransportHeader, I>()
                 .push_on_service(svc::BoxService::layer())
-                .push(svc::BoxNewService::layer())
                 .into_inner(),
         )
         .push_switch(
