@@ -440,9 +440,9 @@ mod tests {
                 authorizations: vec![Authorization {
                     authentication: Authentication::Unauthenticated,
                     networks: vec![client_addr().ip().into()],
-                    name: "testsaz".to_string(),
+                    name: "testsaz".into(),
                 }],
-                name: "testsrv".to_string(),
+                name: "testsrv".into(),
             },
         );
         allow
