@@ -1,6 +1,6 @@
 use crate::{
     self as http,
-    client_handle::SetClientHandle,
+    client_handle::{Closed, SetClientHandle},
     glue::{HyperServerSvc, UpgradeBody},
     h2::Settings as H2Settings,
     trace, upgrade, Version,
@@ -87,6 +87,83 @@ where
 
 // === impl ServeHttp ===
 
+impl<S> ServeHttp<S>
+where
+    S: Service<http::Request<UpgradeBody>, Response = http::Response<http::BoxBody>, Error = Error>,
+    S: Clone + Unpin + Send + 'static,
+    S::Future: Send + 'static,
+{
+    async fn serve_http1<I>(
+        io: I,
+        mut server: Server,
+        svc: SetClientHandle<S>,
+        drain: drain::Watch,
+        closed: Closed,
+    ) -> Result<()>
+    where
+        I: io::AsyncRead + io::AsyncWrite + PeerAddr + Send + Unpin + 'static,
+    {
+        // Enable support for HTTP upgrades (CONNECT and websockets).
+        let mut conn = server
+            .http1_only(true)
+            .serve_connection(io, upgrade::Service::new(svc, drain.clone()))
+            .with_upgrades();
+
+        tokio::select! {
+            res = &mut conn => {
+                debug!(?res, "The client is shutting down the connection");
+                res?
+            }
+            shutdown = drain.signaled() => {
+                debug!("The process is shutting down the connection");
+                Pin::new(&mut conn).graceful_shutdown();
+                shutdown.release_after(conn).await?;
+            }
+            () = closed => {
+                debug!("The stack is tearing down the connection");
+                Pin::new(&mut conn).graceful_shutdown();
+                conn.await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn serve_h2<I>(
+        io: I,
+        mut server: Server,
+        svc: SetClientHandle<S>,
+        drain: drain::Watch,
+        closed: Closed,
+    ) -> Result<()>
+    where
+        I: io::AsyncRead + io::AsyncWrite + PeerAddr + Send + Unpin + 'static,
+    {
+        let mut conn = server
+            .http2_only(true)
+            .serve_connection(io, HyperServerSvc::new(svc));
+
+        tokio::select! {
+            res = &mut conn => {
+                debug!(?res, "The client is shutting down the connection");
+                res?
+            }
+            shutdown = drain.signaled() => {
+                debug!("The process is shutting down the connection");
+                Pin::new(&mut conn).graceful_shutdown();
+                shutdown.release_after(conn).await?;
+            }
+            () = closed => {
+                debug!("The stack is tearing down the connection");
+                Pin::new(&mut conn).graceful_shutdown();
+                conn.await?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
 impl<I, S> Service<I> for ServeHttp<S>
 where
     I: io::AsyncRead + io::AsyncWrite + PeerAddr + Send + Unpin + 'static,
@@ -107,7 +184,7 @@ where
             version,
             inner,
             drain,
-            mut server,
+            server,
         } = self.clone();
         debug!(?version, "Handling as HTTP");
 
@@ -117,56 +194,8 @@ where
         };
 
         match version {
-            Version::Http1 => {
-                // Enable support for HTTP upgrades (CONNECT and websockets).
-                let mut conn = server
-                    .http1_only(true)
-                    .serve_connection(io, upgrade::Service::new(svc, drain.clone()))
-                    .with_upgrades();
-                Box::pin(async move {
-                    tokio::select! {
-                        res = &mut conn => {
-                            debug!(?res, "The client is shutting down the connection");
-                            res?
-                        }
-                        shutdown = drain.signaled() => {
-                            debug!("The process is shutting down the connection");
-                            Pin::new(&mut conn).graceful_shutdown();
-                            shutdown.release_after(conn).await?;
-                        }
-                        () = closed => {
-                            debug!("The stack is tearing down the connection");
-                            Pin::new(&mut conn).graceful_shutdown();
-                            conn.await?;
-                        }
-                    }
-                    Ok(())
-                })
-            }
-            Version::H2 => {
-                let mut conn = server
-                    .http2_only(true)
-                    .serve_connection(io, HyperServerSvc::new(svc));
-                Box::pin(async move {
-                    tokio::select! {
-                        res = &mut conn => {
-                            debug!(?res, "The client is shutting down the connection");
-                            res?
-                        }
-                        shutdown = drain.signaled() => {
-                            debug!("The process is shutting down the connection");
-                            Pin::new(&mut conn).graceful_shutdown();
-                            shutdown.release_after(conn).await?;
-                        }
-                        () = closed => {
-                            debug!("The stack is tearing down the connection");
-                            Pin::new(&mut conn).graceful_shutdown();
-                            conn.await?;
-                        }
-                    }
-                    Ok(())
-                })
-            }
+            Version::Http1 => Box::pin(Self::serve_http1(io, server, svc, drain, closed)),
+            Version::H2 => Box::pin(Self::serve_h2(io, server, svc, drain, closed)),
         }
     }
 }
