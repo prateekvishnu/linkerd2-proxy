@@ -5,14 +5,11 @@ use crate::{
     h2::Settings as H2Settings,
     trace, upgrade, Version,
 };
-use linkerd_error::Error;
+use futures::future;
+use linkerd_error::{Error, Result};
 use linkerd_io::{self as io, PeerAddr};
 use linkerd_stack::{layer, NewService, Param};
-use std::{
-    future::Future,
-    pin::Pin,
-    task::{Context, Poll},
-};
+use std::task::{Context, Poll};
 use tower::Service;
 use tracing::debug;
 
@@ -93,16 +90,13 @@ where
 impl<I, S> Service<I> for ServeHttp<S>
 where
     I: io::AsyncRead + io::AsyncWrite + PeerAddr + Send + Unpin + 'static,
-    S: Service<http::Request<UpgradeBody>, Response = http::Response<http::BoxBody>, Error = Error>
-        + Clone
-        + Unpin
-        + Send
-        + 'static,
+    S: Service<http::Request<UpgradeBody>, Response = http::Response<http::BoxBody>, Error = Error>,
+    S: Clone + Unpin + Send + 'static,
     S::Future: Send + 'static,
 {
     type Response = ();
     type Error = Error;
-    type Future = Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'static>>;
+    type Future = future::BoxFuture<'static, Result<()>>;
 
     fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
@@ -117,16 +111,19 @@ where
         } = self.clone();
         debug!(?version, "Handling as HTTP");
 
-        Box::pin(async move {
-            let (svc, closed) = SetClientHandle::new(io.peer_addr()?, inner.clone());
+        let (svc, closed) = match io.peer_addr() {
+            Ok(pa) => SetClientHandle::new(pa, inner),
+            Err(e) => return Box::pin(future::err(e.into())),
+        };
 
-            match version {
-                Version::Http1 => {
-                    // Enable support for HTTP upgrades (CONNECT and websockets).
-                    let mut conn = server
-                        .http1_only(true)
-                        .serve_connection(io, upgrade::Service::new(svc, drain.clone()))
-                        .with_upgrades();
+        match version {
+            Version::Http1 => {
+                // Enable support for HTTP upgrades (CONNECT and websockets).
+                let mut conn = server
+                    .http1_only(true)
+                    .serve_connection(io, upgrade::Service::new(svc, drain.clone()))
+                    .with_upgrades();
+                Box::pin(async move {
                     tokio::select! {
                         res = &mut conn => {
                             debug!(?res, "The client is shutting down the connection");
@@ -143,30 +140,33 @@ where
                             conn.await?;
                         }
                     }
-                }
-                Version::H2 => {
-                    let mut conn = server
-                        .http2_only(true)
-                        .serve_connection(io, HyperServerSvc::new(svc));
-                    tokio::select! {
-                        res = &mut conn => {
-                            debug!(?res, "The client is shutting down the connection");
-                            res?
-                        }
-                        shutdown = drain.signaled() => {
-                            debug!("The process is shutting down the connection");
-                            Pin::new(&mut conn).graceful_shutdown();
-                            shutdown.release_after(conn).await?;
-                        }
-                        () = closed => {
-                            debug!("The stack is tearing down the connection");
-                            Pin::new(&mut conn).graceful_shutdown();
-                            conn.await?;
-                        }
-                    }
-                }
+                    Ok(())
+                })
             }
-            Ok(())
-        })
+            Version::H2 => {
+                let mut conn = server
+                    .http2_only(true)
+                    .serve_connection(io, HyperServerSvc::new(svc));
+                Box::pin(async move {
+                    tokio::select! {
+                        res = &mut conn => {
+                            debug!(?res, "The client is shutting down the connection");
+                            res?
+                        }
+                        shutdown = drain.signaled() => {
+                            debug!("The process is shutting down the connection");
+                            Pin::new(&mut conn).graceful_shutdown();
+                            shutdown.release_after(conn).await?;
+                        }
+                        () = closed => {
+                            debug!("The stack is tearing down the connection");
+                            Pin::new(&mut conn).graceful_shutdown();
+                            conn.await?;
+                        }
+                    }
+                    Ok(())
+                })
+            }
+        }
     }
 }
