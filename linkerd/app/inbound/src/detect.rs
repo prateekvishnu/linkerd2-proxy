@@ -60,7 +60,12 @@ impl<N> Inbound<N> {
     pub(crate) fn push_detect<T, I, NSvc, F, FSvc>(
         self,
         forward: F,
-    ) -> Inbound<svc::BoxNewTcp<T, I>>
+    ) -> Inbound<
+        svc::BoxNewService<
+            T,
+            impl svc::Service<I, Response = (), Error = Error, Future = impl Send>,
+        >,
+    >
     where
         T: svc::Param<OrigDstAddr> + svc::Param<Remote<ClientAddr>> + svc::Param<AllowPolicy>,
         T: Clone + Send + 'static,
@@ -83,7 +88,15 @@ impl<N> Inbound<N> {
     /// Builds a stack that handles TLS protocol detection according to the port's policy. If the
     /// connection is determined to be TLS, the inner stack is used; otherwise the connection is
     /// passed to the provided 'forward' stack.
-    fn push_detect_tls<T, I, NSvc, F, FSvc>(self, forward: F) -> Inbound<svc::BoxNewTcp<T, I>>
+    fn push_detect_tls<T, I, NSvc, F, FSvc>(
+        self,
+        forward: F,
+    ) -> Inbound<
+        svc::BoxNewService<
+            T,
+            impl svc::Service<I, Response = (), Error = Error, Future = impl Send>,
+        >,
+    >
     where
         T: svc::Param<OrigDstAddr> + svc::Param<Remote<ClientAddr>> + svc::Param<AllowPolicy>,
         T: Clone + Send + 'static,
@@ -171,7 +184,15 @@ impl<N> Inbound<N> {
     /// Builds a stack that handles HTTP detection once TLS detection has been performed. If the
     /// connection is determined to be HTTP, the inner stack is used; otherwise the connection is
     /// passed to the provided 'forward' stack.
-    fn push_detect_http<I, NSvc, F, FSvc>(self, forward: F) -> Inbound<svc::BoxNewTcp<Tls, I>>
+    fn push_detect_http<I, NSvc, F, FSvc>(
+        self,
+        forward: F,
+    ) -> Inbound<
+        svc::BoxNewService<
+            Tls,
+            impl svc::Service<I, Response = (), Error = Error, Future = impl Send>,
+        >,
+    >
     where
         I: io::AsyncRead + io::AsyncWrite + io::PeerAddr,
         I: Debug + Send + Sync + Unpin + 'static,
@@ -244,7 +265,6 @@ impl<N> Inbound<N> {
                     },
                     detect.into_inner(),
                 )
-                .push_on_service(svc::BoxService::layer())
                 .push(svc::BoxNewService::layer())
         })
     }
