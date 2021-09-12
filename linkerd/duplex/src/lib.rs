@@ -287,7 +287,8 @@ fn write_zero() -> io::Error {
 impl CopyBuf {
     fn new() -> Self {
         CopyBuf {
-            buf: Box::new([0; 32 * 1024]),
+            // TODO rather than a static buffer, we should use a `Vec` to avoid unnecessary overhead.
+            buf: Box::new([0; 8 * 1024]),
             read_pos: 0,
             write_pos: 0,
         }
