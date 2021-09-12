@@ -39,6 +39,10 @@ where
         })
         .push_http_router(profiles)
         .push_http_server()
+        .map_stack(|_, _, s| {
+            s.push_on_service(svc::BoxService::layer())
+                .push(svc::BoxNewService::layer())
+        })
         .into_inner()
 }
 
