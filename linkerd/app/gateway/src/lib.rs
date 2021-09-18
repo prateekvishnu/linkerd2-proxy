@@ -85,7 +85,7 @@ where
     O::Response:
         io::AsyncRead + io::AsyncWrite + tls::HasNegotiatedProtocol + Send + Unpin + 'static,
     O::Future: Send + Unpin + 'static,
-    P: profiles::GetProfile<profiles::LookupAddr> + Clone + Send + Sync + Unpin + 'static,
+    P: profiles::GetProfile + Clone + Send + Sync + Unpin + 'static,
     P::Future: Send + 'static,
     P::Error: Send,
     R: Clone + Send + Sync + Unpin + 'static,
@@ -152,14 +152,13 @@ where
             },
             logical.into_inner(),
         )
-        .push(profiles::discover::layer(profiles.clone(), {
+        .push(profiles::NewDiscover::layer(profiles.clone(), {
             let allow = allow_discovery.clone();
-            move |addr: NameAddr| {
-                if allow.matches(addr.name()) {
-                    Ok(profiles::LookupAddr(addr.into()))
-                } else {
-                    Err(RefusedNotResolved(addr))
+            move |addr: &NameAddr| {
+                if !allow.matches(addr.name()) {
+                    return None;
                 }
+                Some(profiles::LookupAddr(addr.clone().into()))
             }
         }))
         .push_on_service(
@@ -189,13 +188,15 @@ where
         .into_stack()
         .push_switch(Ok::<_, Infallible>, endpoint.into_stack())
         .push(NewGateway::layer(local_id))
-        .push(profiles::discover::layer(profiles, move |t: HttpTarget| {
-            if allow_discovery.matches(t.target.name()) {
-                Ok(profiles::LookupAddr(t.target.into()))
-            } else {
-                Err(RefusedNotResolved(t.target))
-            }
-        }))
+        .push(profiles::NewDiscover::layer(
+            profiles,
+            move |t: &HttpTarget| {
+                if !allow_discovery.matches(t.target.name()) {
+                    return None;
+                }
+                Some(profiles::LookupAddr(t.target.clone().into()))
+            },
+        ))
         .instrument(|h: &HttpTarget| debug_span!("gateway", target = %h.target, v = %h.version))
         .push_on_service(
             svc::layers()

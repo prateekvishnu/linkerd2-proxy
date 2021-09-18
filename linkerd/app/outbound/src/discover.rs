@@ -31,30 +31,28 @@ impl<N> Outbound<N> {
             + 'static,
         NSvc: svc::Service<SensorIo<I>, Response = (), Error = Error> + Send + 'static,
         NSvc::Future: Send,
-        P: profiles::GetProfile<profiles::LookupAddr> + Clone + Send + Sync + 'static,
+        P: profiles::GetProfile + Clone + Send + Sync + 'static,
         P::Future: Send,
         P::Error: Send,
     {
         self.map_stack(|config, rt, accept| {
             let allow = config.allow_discovery.clone();
             accept
-                .push(profiles::discover::layer(
+                .push(profiles::NewDiscover::layer(
                     profiles,
-                    move |a: tcp::Accept| {
+                    move |a: &tcp::Accept| {
                         let OrigDstAddr(addr) = a.orig_dst;
-                        if allow.matches_ip(addr.ip()) {
-                            debug!("Allowing profile lookup");
-                            Ok(profiles::LookupAddr(addr.into()))
-                        } else {
+                        if !allow.matches_ip(addr.ip()) {
                             tracing::debug!(
                                 %addr,
                                 networks = %allow.nets(),
                                 "Profile discovery not in configured search networks",
                             );
-                            Err(profiles::DiscoveryRejected::new(
-                                "not in configured search networks",
-                            ))
+                            return None;
                         }
+
+                        debug!("Allowing profile lookup");
+                        Some(profiles::LookupAddr(addr.into()))
                     },
                 ))
                 .instrument(|_: &_| debug_span!("profile"))

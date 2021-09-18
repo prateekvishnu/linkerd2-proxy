@@ -54,7 +54,7 @@ impl Outbound<svc::ArcNewHttp<http::Endpoint>> {
     where
         T: Param<OrigDstAddr> + Clone + Send + Sync + 'static,
         I: io::AsyncRead + io::AsyncWrite + io::PeerAddr + std::fmt::Debug + Send + Unpin + 'static,
-        P: profiles::GetProfile<profiles::LookupAddr> + Clone + Send + Sync + Unpin + 'static,
+        P: profiles::GetProfile + Clone + Send + Sync + Unpin + 'static,
         P::Error: Send,
         P::Future: Send,
         R: Clone + Send + Sync + 'static,
@@ -87,6 +87,7 @@ impl Outbound<svc::ArcNewHttp<http::Endpoint>> {
         let profile_domains = allow_discovery.names().clone();
 
         http_logical
+            .check_new_service::<http::Logical, _>()
             // If a profile was discovered, use it to build a logical stack. Otherwise, the override
             // header was present but no profile information could be discovered, so fail the
             // request.
@@ -105,25 +106,24 @@ impl Outbound<svc::ArcNewHttp<http::Endpoint>> {
                     Err(ProfileRequired)
                 },
             )
-            .push(profiles::discover::layer(
+            .check_new_service::<(Option<profiles::Receiver>, Http<NameAddr>), _>()
+            .push(profiles::NewDiscover::layer(
                 profiles,
-                move |h: Http<NameAddr>| {
+                move |h: &Http<NameAddr>| {
                     // Lookup the profile if the override header was set and it is in the configured
                     // profile domains. Otherwise, profile discovery is skipped.
-                    if profile_domains.matches(h.target.name()) {
-                        return Ok(profiles::LookupAddr(h.target.into()));
+                    if !profile_domains.matches(h.target.name()) {
+                        tracing::debug!(
+                            dst = %h.target,
+                            domains = %profile_domains,
+                            "Address not in a configured domain",
+                        );
+                        return None;
                     }
-
-                    tracing::debug!(
-                        dst = %h.target,
-                        domains = %profile_domains,
-                        "Address not in a configured domain",
-                    );
-                    Err(profiles::DiscoveryRejected::new(
-                        "not in configured ingress search addresses",
-                    ))
+                    Some(profiles::LookupAddr(h.target.clone().into()))
                 },
             ))
+            .check_new_service::<Http<NameAddr>, _>()
             // This service is buffered because it needs to initialize the profile resolution and a
             // fail-fast is instrumented in case it becomes unavailable. When this service is in
             // fail-fast, ensure that we drive the inner service to readiness even if new requests

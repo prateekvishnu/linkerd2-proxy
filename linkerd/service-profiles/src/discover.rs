@@ -1,50 +1,57 @@
-use super::{default::RecoverDefault, GetProfile, GetProfileService, Receiver};
+use super::{default::RecoverDefault, GetProfile, GetProfileService, LookupAddr, Receiver};
 use futures::prelude::*;
-use linkerd_stack::{layer, Filter, FutureService, NewService, Predicate};
+use linkerd_stack::{layer, Either, ExtractParam, FutureService, NewService};
 use std::{future::Future, pin::Pin};
 
-type Service<F, G, M> = Discover<RecoverDefault<Filter<GetProfileService<G>, F>>, M>;
-
-pub fn layer<T, G, F, M>(
-    get_profile: G,
-    filter: F,
-) -> impl layer::Layer<M, Service = Service<F, G, M>> + Clone
-where
-    F: Predicate<T> + Clone,
-    G: GetProfile<F::Request> + Clone,
-{
-    let get_profile = RecoverDefault::new(Filter::new(get_profile.into_service(), filter));
-    layer::mk(move |inner| Discover {
-        get_profile: get_profile.clone(),
-        inner,
-    })
-}
-
 #[derive(Clone, Debug)]
-pub struct Discover<G, M> {
+pub struct NewDiscover<P, G, N> {
+    params: P,
     get_profile: G,
-    inner: M,
+    inner: N,
 }
 
-type MakeFuture<S, E> = Pin<Box<dyn Future<Output = Result<S, E>> + Send + 'static>>;
+type DiscoverService<S, E> =
+    FutureService<Pin<Box<dyn Future<Output = Result<S, E>> + Send + 'static>>, S>;
 
-impl<T, G, M> NewService<T> for Discover<G, M>
+impl<P, G, N> NewDiscover<P, RecoverDefault<GetProfileService<G>>, N> {
+    pub fn layer(get_profile: G, params: P) -> impl layer::Layer<N, Service = Self> + Clone
+    where
+        P: Clone,
+        G: GetProfile + Clone,
+    {
+        let get_profile = RecoverDefault::new(get_profile.into_service());
+
+        layer::mk(move |inner| Self {
+            params: params.clone(),
+            get_profile: get_profile.clone(),
+            inner,
+        })
+    }
+}
+
+impl<T, P, G, N> NewService<T> for NewDiscover<P, G, N>
 where
-    T: Clone + Send + 'static,
-    G: GetProfile<T> + Clone,
+    T: Send + 'static,
+    P: ExtractParam<Option<LookupAddr>, T>,
+    G: GetProfile + Clone,
     G::Future: Send + 'static,
     G::Error: Send,
-    M: NewService<(Option<Receiver>, T)> + Clone + Send + 'static,
+    N: NewService<(Option<Receiver>, T)> + Clone + Send + 'static,
 {
-    type Service = FutureService<MakeFuture<M::Service, G::Error>, M::Service>;
+    type Service = Either<DiscoverService<N::Service, G::Error>, N::Service>;
 
     fn new_service(&self, target: T) -> Self::Service {
+        let lookup = match self.params.extract_param(&target) {
+            Some(lookup) => lookup,
+            None => return Either::B(self.inner.new_service((None, target))),
+        };
+
         let inner = self.inner.clone();
-        FutureService::new(Box::pin(
+        Either::A(FutureService::new(Box::pin(
             self.get_profile
                 .clone()
-                .get_profile(target.clone())
+                .get_profile(lookup)
                 .map_ok(move |rx| inner.new_service((rx, target))),
-        ))
+        )))
     }
 }

@@ -162,7 +162,7 @@ impl Outbound<()> {
         R: Resolve<ConcreteAddr, Endpoint = Metadata, Error = Error>,
         R::Resolution: Send,
         R::Future: Send + Unpin,
-        P: profiles::GetProfile<profiles::LookupAddr> + Clone + Send + Sync + Unpin + 'static,
+        P: profiles::GetProfile + Clone + Send + Sync + Unpin + 'static,
         P::Future: Send,
         P::Error: Send,
     {

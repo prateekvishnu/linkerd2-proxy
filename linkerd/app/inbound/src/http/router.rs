@@ -1,7 +1,6 @@
 use crate::{policy, stack_labels, Inbound};
 use linkerd_app_core::{
-    classify, dst, errors, http_tracing, io, metrics,
-    profiles::{self, DiscoveryRejected},
+    classify, dst, errors, http_tracing, io, metrics, profiles,
     proxy::{http, tap},
     svc::{self, Param},
     tls,
@@ -75,7 +74,7 @@ impl<C> Inbound<C> {
             + Param<tls::ConditionalServerTls>
             + Param<policy::AllowPolicy>,
         T: Clone + Send + 'static,
-        P: profiles::GetProfile<profiles::LookupAddr> + Clone + Send + Sync + 'static,
+        P: profiles::GetProfile + Clone + Send + Sync + 'static,
         P::Future: Send,
         P::Error: Send,
         C: svc::Service<Http> + Clone + Send + Sync + Unpin + 'static,
@@ -174,23 +173,22 @@ impl<C> Inbound<C> {
                         .check_new_service::<Logical, http::Request<_>>()
                         .into_inner(),
                 )
-                .push(profiles::discover::layer(profiles, move |t: Logical| {
+                .push(profiles::NewDiscover::layer(profiles, move |t: &Logical| {
                     // If the target includes a logical named address and it exists in the set of
                     // allowed discovery suffixes, use that address for discovery. Otherwise, fail
                     // discovery (so that we skip the profile stack above).
-                    let addr = t.logical.ok_or_else(|| {
-                        DiscoveryRejected::new("inbound profile discovery requires DNS names")
-                    })?;
+                    let addr = t.logical.as_ref()?;
                     if !allow_profile.matches(addr.name()) {
                         tracing::debug!(
                             %addr,
                             suffixes = %allow_profile,
                             "Rejecting discovery, address not in configured DNS suffixes",
                         );
-                        return Err(DiscoveryRejected::new("address not in search DNS suffixes"));
+                        return None;
                     }
-                    Ok(profiles::LookupAddr(addr.into()))
+                    Some(profiles::LookupAddr(addr.clone().into()))
                 }))
+                .check_new_service::<Logical, http::Request<_>>()
                 .instrument(|_: &Logical| debug_span!("profile"))
                 .push_on_service(
                     svc::layers()

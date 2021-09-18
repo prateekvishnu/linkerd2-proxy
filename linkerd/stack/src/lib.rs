@@ -92,10 +92,19 @@ impl<T: ToOwned> Param<T::Owned> for T {
 
 /// === ExtractParam ===
 
-impl<P: ToOwned, T> ExtractParam<P::Owned, T> for P {
+impl<P, T: Param<P>> ExtractParam<P, T> for () {
     #[inline]
-    fn extract_param(&self, _: &T) -> P::Owned {
-        self.to_owned()
+    fn extract_param(&self, t: &T) -> P {
+        t.param()
+    }
+}
+
+impl<P, T, F> ExtractParam<P, T> for F
+where
+    F: Fn(&T) -> P,
+{
+    fn extract_param(&self, t: &T) -> P {
+        (self)(t)
     }
 }
 

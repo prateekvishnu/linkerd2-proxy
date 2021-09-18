@@ -75,6 +75,13 @@ impl<D: Default> Config<D> {
     }
 }
 
+impl<T, D: Clone> ExtractParam<Self, T> for Config<D> {
+    #[inline]
+    fn extract_param(&self, _: &T) -> Self {
+        self.clone()
+    }
+}
+
 // === impl NewDetectService ===
 
 impl<P, D, N> NewDetectService<P, D, N> {
