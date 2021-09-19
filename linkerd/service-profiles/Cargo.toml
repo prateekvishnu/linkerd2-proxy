@@ -19,6 +19,7 @@ http = "0.2"
 http-body = "0.4"
 indexmap = "1.7"
 linkerd-addr = { path = "../addr" }
+linkerd-cache = { path = "../cache" }
 linkerd-dns-name = { path = "../dns/name" }
 linkerd-error = { path = "../error" }
 linkerd-http-box = { path = "../http-box" }
@@ -26,6 +27,7 @@ linkerd-proxy-api-resolve = { path = "../proxy/api-resolve" }
 linkerd-stack = { path = "../stack" }
 linkerd-tonic-watch = { path = "../tonic-watch" }
 linkerd2-proxy-api = { version = "0.2", features = ["destination", "client"] }
+pin-project = "1"
 rand = { version = "0.8", features = ["small_rng"] }
 regex = "1.5.4"
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
@@ -34,7 +36,6 @@ tonic = { version = "0.5", default-features = false }
 tower = { version = "0.4.8", features = [ "ready-cache", "retry", "util"] }
 thiserror = "1"
 tracing = "0.1.27"
-pin-project = "1"
 
 [dev-dependencies]
 linkerd2-proxy-api = { version = "0.2", features = ["arbitrary"] }

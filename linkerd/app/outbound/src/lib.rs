@@ -158,13 +158,13 @@ impl Outbound<()> {
         A: Param<Remote<ClientAddr>> + Param<OrigDstAddr> + Clone + Send + Sync + 'static,
         I: io::AsyncRead + io::AsyncWrite + io::Peek + io::PeerAddr,
         I: Debug + Unpin + Send + Sync + 'static,
-        R: Clone + Send + Sync + Unpin + 'static,
+        P: profiles::GetProfile + Clone + Send + Sync + Unpin + 'static,
+        P::Future: Send + Unpin,
+        P::Error: Send,
         R: Resolve<ConcreteAddr, Endpoint = Metadata, Error = Error>,
+        R: Clone + Send + Sync + Unpin + 'static,
         R::Resolution: Send,
         R::Future: Send + Unpin,
-        P: profiles::GetProfile + Clone + Send + Sync + Unpin + 'static,
-        P::Future: Send,
-        P::Error: Send,
     {
         if self.config.ingress_mode {
             info!("Outbound routing in ingress-mode");

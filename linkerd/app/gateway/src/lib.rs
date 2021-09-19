@@ -86,7 +86,7 @@ where
         io::AsyncRead + io::AsyncWrite + tls::HasNegotiatedProtocol + Send + Unpin + 'static,
     O::Future: Send + Unpin + 'static,
     P: profiles::GetProfile + Clone + Send + Sync + Unpin + 'static,
-    P::Future: Send + 'static,
+    P::Future: Send + Unpin + 'static,
     P::Error: Send,
     R: Clone + Send + Sync + Unpin + 'static,
     R: Resolve<ConcreteAddr, Endpoint = Metadata, Error = Error>,

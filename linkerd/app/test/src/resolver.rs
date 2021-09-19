@@ -158,7 +158,7 @@ impl Profiles {
             .endpoints
             .lock()
             .unwrap()
-            .insert(addr.into(), Some(rx.into()));
+            .insert(addr.into(), Some(profiles::Receiver::for_test(rx)));
         tx
     }
 
@@ -169,7 +169,7 @@ impl Profiles {
             .endpoints
             .lock()
             .unwrap()
-            .insert(addr.into(), Some(rx.into()));
+            .insert(addr.into(), Some(profiles::Receiver::for_test(rx)));
         self
     }
 

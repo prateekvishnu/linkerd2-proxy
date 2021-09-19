@@ -3,6 +3,7 @@
 
 use futures::Stream;
 use linkerd_addr::{Addr, NameAddr};
+use linkerd_cache as cache;
 use linkerd_error::Error;
 use linkerd_proxy_api_resolve::Metadata;
 use std::{
@@ -18,7 +19,6 @@ use tokio::sync::watch;
 use tower::util::{Oneshot, ServiceExt};
 
 mod client;
-mod default;
 mod discover;
 pub mod http;
 mod proto;
@@ -29,11 +29,13 @@ pub use self::{client::Client, discover::NewDiscover};
 #[derive(Clone, Debug)]
 pub struct Receiver {
     inner: tokio::sync::watch::Receiver<Profile>,
+    _handle: Option<cache::Handle>,
 }
 
 #[derive(Debug)]
 struct ReceiverStream {
     inner: tokio_stream::wrappers::WatchStream<Profile>,
+    _handle: Option<cache::Handle>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -59,9 +61,6 @@ pub struct Target {
     pub weight: u32,
 }
 
-#[derive(Clone, Debug)]
-pub struct GetProfileService<P>(P);
-
 #[derive(Debug, Error)]
 pub enum DiscoveryRejected {
     #[error("discovery rejected by control plane: {0}")]
@@ -79,14 +78,7 @@ pub trait GetProfile {
     type Error: Into<Error>;
     type Future: Future<Output = Result<Option<Receiver>, Self::Error>>;
 
-    fn get_profile(&mut self, target: LookupAddr) -> Self::Future;
-
-    fn into_service(self) -> GetProfileService<Self>
-    where
-        Self: Sized,
-    {
-        GetProfileService(self)
-    }
+    fn get_profile(&self, target: LookupAddr) -> Self::Future;
 }
 
 impl<S> GetProfile for S
@@ -98,34 +90,26 @@ where
     type Future = Oneshot<S, LookupAddr>;
 
     #[inline]
-    fn get_profile(&mut self, target: LookupAddr) -> Self::Future {
+    fn get_profile(&self, target: LookupAddr) -> Self::Future {
         self.clone().oneshot(target)
     }
 }
-
-impl<P> tower::Service<LookupAddr> for GetProfileService<P>
-where
-    P: GetProfile,
-{
-    type Response = Option<Receiver>;
-    type Error = P::Error;
-    type Future = P::Future;
-
-    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    #[inline]
-    fn call(&mut self, target: LookupAddr) -> Self::Future {
-        self.0.get_profile(target)
-    }
-}
-
 // === impl Receiver ===
 
-impl From<watch::Receiver<Profile>> for Receiver {
-    fn from(inner: watch::Receiver<Profile>) -> Self {
-        Self { inner }
+impl Receiver {
+    fn new(inner: watch::Receiver<Profile>, handle: cache::Handle) -> Self {
+        Self {
+            inner,
+            _handle: Some(handle),
+        }
+    }
+
+    /// Creates a receiver suitable for tests.
+    pub fn for_test(inner: watch::Receiver<Profile>) -> Self {
+        Self {
+            inner,
+            _handle: None,
+        }
     }
 }
 
@@ -150,9 +134,9 @@ impl Receiver {
 // === impl ReceiverStream ===
 
 impl From<Receiver> for ReceiverStream {
-    fn from(Receiver { inner }: Receiver) -> Self {
+    fn from(Receiver { inner, _handle }: Receiver) -> Self {
         let inner = tokio_stream::wrappers::WatchStream::new(inner);
-        ReceiverStream { inner }
+        ReceiverStream { inner, _handle }
     }
 }
 

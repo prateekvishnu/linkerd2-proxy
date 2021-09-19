@@ -144,7 +144,7 @@ mod tests {
             ..Default::default()
         });
         let logical = Logical {
-            profile: rx.into(),
+            profile: profiles::Receiver::for_test(rx),
             logical_addr: logical_addr.clone(),
             protocol: (),
         };
@@ -207,7 +207,7 @@ mod tests {
             ..Default::default()
         });
         let logical = Logical {
-            profile: rx.into(),
+            profile: profiles::Receiver::for_test(rx),
             logical_addr: logical_addr.clone(),
             protocol: (),
         };

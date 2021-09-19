@@ -12,7 +12,7 @@ use std::{
 use tokio::{sync::Notify, time};
 use tracing::{debug, instrument, trace};
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Cache<T, N>
 where
     T: Eq + Hash,
@@ -25,13 +25,16 @@ where
 
 #[derive(Clone, Debug)]
 pub struct Cached<S>
-where
-    S: Send + Sync + 'static,
+// where
+//     S: Send + Sync + 'static,
 {
     inner: S,
-    // Notifies entry's eviction task that a drop has occurred.
-    handle: Arc<Notify>,
+    handle: Handle,
 }
+
+/// Notifies entry's eviction task that a drop has occurred.
+#[derive(Clone, Debug)]
+pub struct Handle(Arc<Notify>);
 
 type Services<T, S> = RwLock<HashMap<T, (S, Weak<Notify>)>>;
 
@@ -47,7 +50,7 @@ where
         layer::mk(move |inner| Self::new(idle, inner))
     }
 
-    fn new(idle: time::Duration, inner: N) -> Self {
+    pub fn new(idle: time::Duration, inner: N) -> Self {
         let services = Arc::new(Services::default());
         Self {
             inner,
@@ -62,7 +65,7 @@ where
         cache: &Arc<Services<T, N::Service>>,
     ) -> Arc<Notify> {
         // Spawn a background task that holds the handle. Every time the handle
-        // is notified, it resets the idle timeout. Every time teh idle timeout
+        // is notified, it resets the idle timeout. Every time the idle timeout
         // expires, the handle is checked and the service is dropped if there
         // are no active handles.
         let handle = Arc::new(Notify::new());
@@ -82,20 +85,26 @@ where
         mut reset: Arc<Notify>,
         cache: Weak<Services<T, N::Service>>,
     ) {
-        // Wait for the handle to be notified before starting to track idleness.
+        // Wait for the service to be used and dropped a least once.
         reset.notified().await;
         debug!("Awaiting idleness");
 
-        // Wait for either the reset to be notified or the idle timeout to
-        // elapse.
         loop {
+            // Wait for all active services to be dropped before starting idleness.
+            while Arc::strong_count(&reset) > 1 {
+                reset.notified().await;
+            }
+
+            // Wait for either the reset to be notified or the idle timeout to elapse.
             tokio::select! {
                 biased;
 
-                // If the reset was notified, restart the timer.
+                // If the reset was notified, then the service was acquired and dropped. So restart
+                // the timer.
                 _ = reset.notified() => {
                     trace!("Reset");
                 }
+
                 _ = time::sleep(idle) => match cache.upgrade() {
                     Some(cache) => match Arc::try_unwrap(reset) {
                         // If this is the last reference to the handle after the
@@ -139,7 +148,7 @@ where
                 trace!("Using cached service");
                 return Cached {
                     inner: svc.clone(),
-                    handle,
+                    handle: Handle(handle),
                 };
             }
         }
@@ -155,7 +164,7 @@ where
                         trace!(?target, "Using cached service");
                         Cached {
                             inner: svc.clone(),
-                            handle,
+                            handle: Handle(handle),
                         }
                     }
                     None => {
@@ -163,7 +172,10 @@ where
                         let handle = Self::spawn_idle(target.clone(), self.idle, &self.services);
                         let inner = self.inner.new_service(target);
                         entry.insert((inner.clone(), Arc::downgrade(&handle)));
-                        Cached { inner, handle }
+                        Cached {
+                            inner,
+                            handle: Handle(handle),
+                        }
                     }
                 }
             }
@@ -172,13 +184,30 @@ where
                 let handle = Self::spawn_idle(target.clone(), self.idle, &self.services);
                 let inner = self.inner.new_service(target);
                 entry.insert((inner.clone(), Arc::downgrade(&handle)));
-                Cached { inner, handle }
+                Cached {
+                    inner,
+                    handle: Handle(handle),
+                }
             }
         }
     }
 }
 
 // === impl Cached ===
+
+impl<T> Cached<T> {
+    pub fn get_ref(&self) -> &T {
+        &self.inner
+    }
+
+    pub fn get_mut(&mut self) -> &mut T {
+        &mut self.inner
+    }
+
+    pub fn into_parts(self) -> (T, Handle) {
+        (self.inner, self.handle)
+    }
+}
 
 impl<Req, S> tower::Service<Req> for Cached<S>
 where
@@ -199,12 +228,9 @@ where
     }
 }
 
-impl<S> Drop for Cached<S>
-where
-    S: Send + Sync + 'static,
-{
+impl Drop for Handle {
     fn drop(&mut self) {
-        self.handle.notify_one();
+        self.0.notify_one();
     }
 }
 
@@ -218,9 +244,12 @@ async fn test_idle_retain() {
 
     let handle = Cache::<(), fn(()) -> ()>::spawn_idle((), idle, &cache);
     cache.write().insert((), ((), Arc::downgrade(&handle)));
-    let c0 = Cached { inner: (), handle };
+    let c0 = Cached {
+        inner: (),
+        handle: Handle(handle),
+    };
 
-    let handle = Arc::downgrade(&c0.handle);
+    let handle = Arc::downgrade(&c0.handle.0);
 
     // Let an idle timeout elapse and ensured the held service has not been
     // evicted.
@@ -240,7 +269,7 @@ async fn test_idle_retain() {
     let c1 = Cached {
         inner: (),
         // Retain the handle from the first instance.
-        handle: handle.upgrade().unwrap(),
+        handle: Handle(handle.upgrade().unwrap()),
     };
 
     // Drop the new cache instance. Wait the remainder of the first idle timeout

@@ -39,12 +39,19 @@ impl Config {
         identity: Option<LocalCrtKey>,
     ) -> Result<Dst, Error> {
         let addr = self.control.addr.clone();
+        let buffer_capacity = self.control.buffer_capacity;
         let backoff = BackoffUnlessInvalidArgument(self.control.connect.backoff);
         let svc = self.control.build(dns, metrics, identity).new_service(());
 
         Ok(Dst {
             addr,
-            profiles: profiles::Client::new(backoff, svc.clone(), self.context.clone()),
+            profiles: profiles::Client::new(
+                backoff,
+                svc.clone(),
+                self.context.clone(),
+                std::time::Duration::from_secs(10), // FIXME
+                buffer_capacity,
+            ),
             resolve: recover::Resolve::new(backoff, api::Resolve::new(svc, self.context)),
         })
     }

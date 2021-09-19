@@ -32,7 +32,7 @@ impl<N> Outbound<N> {
         NSvc: svc::Service<SensorIo<I>, Response = (), Error = Error> + Send + 'static,
         NSvc::Future: Send,
         P: profiles::GetProfile + Clone + Send + Sync + 'static,
-        P::Future: Send,
+        P::Future: Send + Unpin,
         P::Error: Send,
     {
         self.map_stack(|config, rt, accept| {
@@ -55,6 +55,7 @@ impl<N> Outbound<N> {
                         Some(profiles::LookupAddr(addr.into()))
                     },
                 ))
+                .check_new_service::<tcp::Accept, _>()
                 .instrument(|_: &_| debug_span!("profile"))
                 .push_on_service(
                     svc::layers()

@@ -1275,6 +1275,7 @@ dependencies = [
  "http-body",
  "indexmap",
  "linkerd-addr",
+ "linkerd-cache",
  "linkerd-dns-name",
  "linkerd-error",
  "linkerd-http-box",

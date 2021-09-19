@@ -8,11 +8,7 @@ pub trait NewService<T> {
     fn new_service(&self, target: T) -> Self::Service;
 }
 
-/// A Layer that modifies inner `MakeService`s to be exposd as a `NewService`.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct FromMakeServiceLayer(());
-
-/// Modifies inner `MakeService`s to be exposd as a `NewService`.
+/// Modifies inner `MakeService`s to be exposed as a `NewService`.
 #[derive(Clone, Copy, Debug)]
 pub struct FromMakeService<S> {
     make_service: S,

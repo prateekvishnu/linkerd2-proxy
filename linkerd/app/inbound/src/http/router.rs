@@ -75,7 +75,7 @@ impl<C> Inbound<C> {
             + Param<policy::AllowPolicy>,
         T: Clone + Send + 'static,
         P: profiles::GetProfile + Clone + Send + Sync + 'static,
-        P::Future: Send,
+        P::Future: Send + Unpin,
         P::Error: Send,
         C: svc::Service<Http> + Clone + Send + Sync + Unpin + 'static,
         C::Response: io::AsyncRead + io::AsyncWrite + Send + Unpin + 'static,
