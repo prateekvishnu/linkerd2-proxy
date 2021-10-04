@@ -179,7 +179,6 @@ pub const ENV_POLICY_CLUSTER_NETWORKS: &str = "LINKERD2_PROXY_POLICY_CLUSTER_NET
 
 pub const ENV_INBOUND_IPS: &str = "LINKERD2_PROXY_INBOUND_IPS";
 
-pub const ENV_IDENTITY_DISABLED: &str = "LINKERD2_PROXY_IDENTITY_DISABLED";
 pub const ENV_IDENTITY_DIR: &str = "LINKERD2_PROXY_IDENTITY_DIR";
 pub const ENV_IDENTITY_TRUST_ANCHORS: &str = "LINKERD2_PROXY_IDENTITY_TRUST_ANCHORS";
 pub const ENV_IDENTITY_IDENTITY_LOCAL_NAME: &str = "LINKERD2_PROXY_IDENTITY_LOCAL_NAME";
@@ -616,27 +615,16 @@ pub fn parse_config<S: Strings>(strings: &S) -> Result<super::Config, EnvError> 
                     // - ports that require some form of proxy-terminated TLS, though not
                     //   necessarily with a client identity.
                     // - opaque ports
-                    let require_identity_ports = {
-                        let ports =
-                            parse(strings, ENV_INBOUND_PORTS_REQUIRE_IDENTITY, parse_port_set)?
-                                .unwrap_or_default()
-                                .into_iter()
-                                .map(|p| {
-                                    let allow = policy::defaults::all_authenticated(
-                                        detect_protocol_timeout,
-                                    );
-                                    (p, allow)
-                                })
-                                .collect::<HashMap<_, _>>();
-                        if id_disabled && !ports.is_empty() {
-                            error!(
-                                "if {} is true, {} must be empty",
-                                ENV_IDENTITY_DISABLED, ENV_INBOUND_PORTS_REQUIRE_IDENTITY
-                            );
-                            return Err(EnvError::InvalidEnvVar);
-                        }
-                        ports
-                    };
+                    let require_identity_ports =
+                        parse(strings, ENV_INBOUND_PORTS_REQUIRE_IDENTITY, parse_port_set)?
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|p| {
+                                let allow =
+                                    policy::defaults::all_authenticated(detect_protocol_timeout);
+                                (p, allow)
+                            })
+                            .collect::<HashMap<_, _>>();
 
                     let require_tls_ports = {
                         let mut ports =
@@ -654,13 +642,6 @@ pub fn parse_config<S: Strings>(strings: &S) -> Result<super::Config, EnvError> 
                         // there are duplicates.
                         for p in require_identity_ports.keys() {
                             ports.remove(p);
-                        }
-                        if id_disabled && !ports.is_empty() {
-                            error!(
-                                "if {} is true, {} must be empty",
-                                ENV_IDENTITY_DISABLED, ENV_INBOUND_PORTS_REQUIRE_TLS
-                            );
-                            return Err(EnvError::InvalidEnvVar);
                         }
                         ports
                     };
@@ -1156,34 +1137,12 @@ pub fn parse_identity_config<S: Strings>(
     let min_refresh = parse(strings, ENV_IDENTITY_MIN_REFRESH, parse_duration);
     let max_refresh = parse(strings, ENV_IDENTITY_MAX_REFRESH, parse_duration);
 
-    let disabled = strings
-        .get(ENV_IDENTITY_DISABLED)?
-        .map(|d| !d.is_empty())
-        .unwrap_or(false);
-
-    match (
-        disabled,
-        control?,
-        ta?,
-        dir?,
-        li?,
-        tok?,
-        min_refresh?,
-        max_refresh?,
-    ) {
-        (disabled, None, None, None, None, None, None, None) => {
-            if !disabled {
-                error!(
-                    "{} must be set or identity configuration must be specified.",
-                    ENV_IDENTITY_DISABLED
-                );
-                Err(EnvError::InvalidEnvVar)
-            } else {
-                Ok(None)
-            }
+    match (control?, ta?, dir?, li?, tok?, min_refresh?, max_refresh?) {
+        (None, None, None, None, None, None, None) => {
+            error!("Identity configuration must be specified.");
+            Err(EnvError::InvalidEnvVar)
         }
         (
-            false,
             Some(control),
             Some(trust_anchors),
             Some(dir),
@@ -1241,13 +1200,7 @@ pub fn parse_identity_config<S: Strings>(
                 },
             )))
         }
-        (disabled, addr, trust_anchors, end_entity_dir, local_id, token, _minr, _maxr) => {
-            if disabled {
-                error!(
-                    "{} must be unset when other identity variables are set.",
-                    ENV_IDENTITY_DISABLED,
-                );
-            }
+        (addr, trust_anchors, end_entity_dir, local_id, token, _minr, _maxr) => {
             let s = format!("{0}_ADDR and {0}_NAME", ENV_IDENTITY_SVC_BASE);
             let svc_env: &str = s.as_str();
             for (unset, name) in &[
