@@ -1468,7 +1468,6 @@ dependencies = [
 name = "linkerd2-proxy"
 version = "0.1.0"
 dependencies = [
- "futures",
  "linkerd-app",
  "linkerd-signal",
  "mimalloc",

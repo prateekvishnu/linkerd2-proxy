@@ -9,13 +9,13 @@ description = "The main proxy executable"
 
 [features]
 default = ["multicore"]
+mimalloc-secure = ["mimalloc", "mimalloc/secure"]
 multicore = ["tokio/rt-multi-thread", "num_cpus"]
 
 [dependencies]
-futures = { version = "0.3", default-features = false }
-mimalloc = { version = "0.1.26", optional = true }
+mimalloc = { version = "0.1.26", optional = true, default-features = false }
 num_cpus = { version = "1", optional = true }
 linkerd-app = { path = "../linkerd/app" }
 linkerd-signal = { path = "../linkerd/signal" }
-tokio = { version = "1", features = ["rt", "time", "net"] }
+tokio = { version = "1", features = ["rt", "sync", "time", "net"] }
 tracing = "0.1.29"
