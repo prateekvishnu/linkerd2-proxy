@@ -3,7 +3,7 @@ use linkerd_app_core::{
     classify, dst, errors, http_tracing, io, metrics,
     profiles::{self, DiscoveryRejected},
     proxy::{http, tap},
-    svc::{self, Param},
+    svc::{self, ExtractParam, Param},
     tls,
     transport::{self, ClientAddr, Remote, ServerAddr},
     Error, Infallible, NameAddr, Result,
@@ -14,7 +14,7 @@ use tracing::{debug, debug_span};
 /// Describes an HTTP client target.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Http {
-    port: u16,
+    addr: Remote<ServerAddr>,
     settings: http::client::Settings,
     permit: policy::Permit,
 }
@@ -22,7 +22,6 @@ pub struct Http {
 /// Builds `Logical` targets for each HTTP request.
 #[derive(Clone, Debug)]
 struct LogicalPerRequest {
-    client: Remote<ClientAddr>,
     server: Remote<ServerAddr>,
     tls: tls::ConditionalServerTls,
     permit: policy::Permit,
@@ -59,7 +58,7 @@ impl<C> Inbound<C> {
         self,
         profiles: P,
     ) -> Inbound<
-        svc::BoxNewService<
+        svc::ArcNewService<
             T,
             impl svc::Service<
                     http::Request<http::BoxBody>,
@@ -95,16 +94,15 @@ impl<C> Inbound<C> {
                     config.proxy.connect.h1_settings,
                     config.proxy.connect.h2_settings,
                 ))
-                .push_on_service(svc::MapErrLayer::new(Into::into))
+                .push_on_service(svc::MapErr::layer(Into::into))
                 .into_new_service()
                 .push_new_reconnect(config.proxy.connect.backoff)
-                .check_new_service::<Http, http::Request<_>>()
                 .push_map_target(Http::from)
                 // Handle connection-level errors eagerly so that we can report 5XX failures in tap
                 // and metrics. HTTP error metrics are not incremented here so that errors are not
                 // double-counted--i.e., endpoint metrics track these responses and error metrics
                 // track proxy errors that occur higher in the stack.
-                .push_on_service(ClientRescue::layer())
+                .push(ClientRescue::layer())
                 // Registers the stack to be tapped.
                 .push(tap::NewTapHttp::layer(rt.tap.clone()))
                 // Records metrics for each `Logical`.
@@ -118,8 +116,13 @@ impl<C> Inbound<C> {
                     rt.span_sink.clone(),
                     super::trace_labels(),
                 ))
-                .push_on_service(http::BoxResponse::layer())
-                .check_new_service::<Logical, http::Request<_>>();
+                .push_on_service(svc::layers()
+                    .push(http::BoxResponse::layer())
+                    // This box is needed to reduce compile times on recent (2021-10-17) nightlies,
+                    // though this may be fixed by https://github.com/rust-lang/rust/pull/89831. It
+                    // should be removed when possible.
+                    .push(svc::BoxService::layer())
+                );
 
             // Attempts to discover a service profile for each logical target (as
             // informed by the request's headers). The stack is cached until a
@@ -222,21 +225,23 @@ impl<C> Inbound<C> {
                         .push(http::BoxResponse::layer()),
                 )
                 .check_new_service::<Logical, http::Request<http::BoxBody>>()
-                .instrument(|t: &Logical| match (t.http, t.logical.as_ref()) {
-                    (http::Version::H2, None) => debug_span!("http2"),
-                    (http::Version::H2, Some(name)) => debug_span!("http2", %name),
-                    (http::Version::Http1, None) => debug_span!("http1"),
-                    (http::Version::Http1, Some(name)) => debug_span!("http1", %name),
+                .instrument(|t: &Logical| {
+                    let name = t.logical.as_ref().map(tracing::field::display);
+                    match t.http {
+                        http::Version::H2 => debug_span!("http2", name),
+                        http::Version::Http1 => debug_span!("http1", name),
+                    }
                 })
                 // Routes each request to a target, obtains a service for that target, and
                 // dispatches the request. NewRouter moves the NewService into the service type, so
                 // minimize it's type footprint with a Box.
+                .push(svc::ArcNewService::layer())
                 .push(svc::NewRouter::layer(LogicalPerRequest::from))
                 .push(policy::NewAuthorizeHttp::layer(rt.metrics.http_authz.clone()))
                 // Used by tap.
                 .push_http_insert_target::<tls::ConditionalServerTls>()
                 .push_http_insert_target::<Remote<ClientAddr>>()
-                .push(svc::BoxNewService::layer())
+                .push(svc::ArcNewService::layer())
         })
     }
 }
@@ -246,7 +251,6 @@ impl<C> Inbound<C> {
 impl<T> From<(policy::Permit, T)> for LogicalPerRequest
 where
     T: Param<Remote<ServerAddr>>,
-    T: Param<Remote<ClientAddr>>,
     T: Param<tls::ConditionalServerTls>,
 {
     fn from((permit, t): (policy::Permit, T)) -> Self {
@@ -256,7 +260,6 @@ where
         ];
 
         Self {
-            client: t.param(),
             server: t.param(),
             tls: t.param(),
             permit,
@@ -395,9 +398,9 @@ impl tap::Inspect for Logical {
 
 // === impl Http ===
 
-impl Param<u16> for Http {
-    fn param(&self) -> u16 {
-        self.port
+impl Param<Remote<ServerAddr>> for Http {
+    fn param(&self) -> Remote<ServerAddr> {
+        self.addr
     }
 }
 
@@ -410,7 +413,7 @@ impl Param<http::client::Settings> for Http {
 impl From<Logical> for Http {
     fn from(l: Logical) -> Self {
         Self {
-            port: l.addr.as_ref().port(),
+            addr: l.addr,
             settings: l.http.into(),
             permit: l.permit,
         }
@@ -426,8 +429,32 @@ impl Param<transport::labels::Key> for Http {
 // === impl ClientRescue ===
 
 impl ClientRescue {
-    pub fn layer() -> errors::respond::Layer<Self> {
-        errors::respond::NewRespond::layer(Self)
+    pub fn layer<N>(
+    ) -> impl svc::layer::Layer<N, Service = errors::NewRespondService<Self, Self, N>> + Clone {
+        errors::respond::layer(Self)
+    }
+}
+
+impl<T> ExtractParam<Self, T> for ClientRescue {
+    #[inline]
+    fn extract_param(&self, _: &T) -> Self {
+        *self
+    }
+}
+
+impl ExtractParam<errors::respond::EmitHeaders, Logical> for ClientRescue {
+    #[inline]
+    fn extract_param(&self, t: &Logical) -> errors::respond::EmitHeaders {
+        // Only emit informational headers to meshed peers.
+        let emit = t
+            .tls
+            .value()
+            .map(|tls| match tls {
+                tls::ServerTls::Established { client_id, .. } => client_id.is_some(),
+                _ => false,
+            })
+            .unwrap_or(false);
+        errors::respond::EmitHeaders(emit)
     }
 }
 

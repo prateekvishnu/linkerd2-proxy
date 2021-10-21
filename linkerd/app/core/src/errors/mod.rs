@@ -1,9 +1,10 @@
 pub mod respond;
 
-pub use self::respond::{HttpRescue, NewRespond, SyntheticHttpResponse};
+pub use self::respond::{HttpRescue, NewRespond, NewRespondService, SyntheticHttpResponse};
 pub use linkerd_proxy_http::h2::H2Error;
-pub use linkerd_timeout::{FailFastError, ResponseTimeout};
+pub use linkerd_stack::FailFastError;
 use thiserror::Error;
+pub use tonic::Code as Grpc;
 
 #[derive(Debug, Error)]
 #[error("connect timed out after {0:?}")]

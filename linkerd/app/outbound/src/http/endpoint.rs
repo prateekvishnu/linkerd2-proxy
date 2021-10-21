@@ -1,17 +1,20 @@
-use super::{peer_proxy_errors::PeerProxyErrors, require_id_header};
+use super::{NewRequireIdentity, NewStripProxyError, ProxyConnectionClose};
 use crate::Outbound;
 use linkerd_app_core::{
     classify, config, errors, http_tracing, metrics,
     proxy::{http, tap},
-    svc, tls, Error, Result, CANONICAL_DST_HEADER,
+    svc::{self, ExtractParam},
+    tls, Error, Result, CANONICAL_DST_HEADER,
 };
 use tokio::io;
 
 #[derive(Copy, Clone, Debug)]
-struct ClientRescue;
+struct ClientRescue {
+    emit_headers: bool,
+}
 
 impl<C> Outbound<C> {
-    pub fn push_http_endpoint<T, B>(self) -> Outbound<svc::BoxNewHttp<T, B>>
+    pub fn push_http_endpoint<T, B>(self) -> Outbound<svc::ArcNewHttp<T, B>>
     where
         T: Clone + Send + Sync + 'static,
         T: svc::Param<http::client::Settings>
@@ -39,17 +42,28 @@ impl<C> Outbound<C> {
             // HTTP/1.x fallback is supported as needed.
             connect
                 .push(http::client::layer(h1_settings, h2_settings))
-                .push_on_service(svc::MapErrLayer::new(Into::<Error>::into))
+                .push_on_service(svc::MapErr::layer(Into::<Error>::into))
                 .check_service::<T>()
                 .into_new_service()
+                // Drive the connection to completion regardless of whether the reconnect is being
+                // actively polled.
+                .push_on_service(svc::layer::mk(svc::SpawnReady::new))
                 .push_new_reconnect(backoff)
+                // Set the TLS status on responses so that the stack can detect whether the request
+                // was sent over a meshed connection.
+                .push_http_response_insert_target::<tls::ConditionalClientTls>()
+                // If the outbound proxy is not configured to emit headers, then strip the
+                // `l5d-proxy-errors` header if set by the peer.
+                .push(NewStripProxyError::layer(config.emit_headers))
                 // Tear down server connections when a peer proxy generates an error.
-                .push(PeerProxyErrors::layer())
+                // TODO(ver) this should only be honored when forwarding and not when the connection
+                // is part of a balancer.
+                .push(ProxyConnectionClose::layer())
                 // Handle connection-level errors eagerly so that we can report 5XX failures in tap
                 // and metrics. HTTP error metrics are not incremented here so that errors are not
                 // double-counted--i.e., endpoint metrics track these responses and error metrics
                 // track proxy errors that occur higher in the stack.
-                .push_on_service(ClientRescue::layer())
+                .push(ClientRescue::layer(config.emit_headers))
                 .push(tap::NewTapHttp::layer(rt.tap.clone()))
                 .push(
                     rt.metrics
@@ -61,7 +75,7 @@ impl<C> Outbound<C> {
                     rt.span_sink.clone(),
                     crate::trace_labels(),
                 ))
-                .push(require_id_header::NewRequireIdentity::layer())
+                .push(NewRequireIdentity::layer())
                 .push(http::NewOverrideAuthority::layer(vec![
                     "host",
                     CANONICAL_DST_HEADER,
@@ -71,7 +85,7 @@ impl<C> Outbound<C> {
                         .push(http::BoxResponse::layer())
                         .push(svc::BoxService::layer()),
                 )
-                .push(svc::BoxNewService::layer())
+                .push(svc::ArcNewService::layer())
         })
     }
 }
@@ -80,8 +94,25 @@ impl<C> Outbound<C> {
 
 impl ClientRescue {
     /// Synthesizes responses for HTTP requests that encounter proxy errors.
-    pub fn layer() -> errors::respond::Layer<Self> {
-        errors::respond::NewRespond::layer(Self)
+    pub fn layer<N>(
+        emit_headers: bool,
+    ) -> impl svc::layer::Layer<N, Service = errors::NewRespondService<Self, Self, N>> + Clone {
+        errors::respond::layer(Self { emit_headers })
+    }
+}
+
+impl<T> ExtractParam<Self, T> for ClientRescue {
+    #[inline]
+    fn extract_param(&self, _: &T) -> Self {
+        *self
+    }
+}
+
+impl<T> ExtractParam<errors::respond::EmitHeaders, T> for ClientRescue {
+    #[inline]
+    fn extract_param(&self, _: &T) -> errors::respond::EmitHeaders {
+        // Always emit informational headers on responses to an application.
+        errors::respond::EmitHeaders(self.emit_headers)
     }
 }
 

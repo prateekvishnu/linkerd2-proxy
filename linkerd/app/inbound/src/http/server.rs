@@ -6,10 +6,11 @@ pub use linkerd_app_core::proxy::http::{
 };
 use linkerd_app_core::{
     config::{ProxyConfig, ServerConfig},
-    errors, http_tracing, identity, io,
+    errors, http_tracing, io,
     metrics::ServerLabel,
     proxy::http,
-    svc::{self, Param},
+    svc::{self, ExtractParam, Param},
+    tls,
     transport::OrigDstAddr,
     Error, Result,
 };
@@ -19,21 +20,14 @@ use tracing::debug_span;
 struct ServerRescue;
 
 impl<H> Inbound<H> {
-    pub fn push_http_server<T, I, HSvc>(
-        self,
-    ) -> Inbound<
-        svc::BoxNewService<
-            T,
-            impl svc::Service<I, Response = (), Error = Error, Future = impl Send>,
-        >,
-    >
+    pub fn push_http_server<T, I, HSvc>(self) -> Inbound<svc::ArcNewTcp<T, I>>
     where
         T: Param<Version>
             + Param<http::normalize_uri::DefaultAuthority>
-            + Param<Option<identity::Name>>
+            + Param<tls::ConditionalServerTls>
             + Param<ServerLabel>
             + Param<OrigDstAddr>,
-        T: Clone + Send + 'static,
+        T: Clone + Send + Unpin + 'static,
         I: io::AsyncRead + io::AsyncWrite + io::PeerAddr + Send + Unpin + 'static,
         H: svc::NewService<T, Service = HSvc> + Clone + Send + Sync + Unpin + 'static,
         HSvc: svc::Service<http::Request<http::BoxBody>, Response = http::Response<http::BoxBody>>
@@ -57,7 +51,7 @@ impl<H> Inbound<H> {
                 // `Client`. This must be below the `orig_proto::Downgrade` layer, since
                 // the request may have been downgraded from a HTTP/2 orig-proto request.
                 .push(http::NewNormalizeUri::layer())
-                .push(NewSetIdentityHeader::layer())
+                .push(NewSetIdentityHeader::layer(()))
                 .push_on_service(
                     svc::layers()
                         .push(http::BoxRequest::layer())
@@ -73,9 +67,9 @@ impl<H> Inbound<H> {
                         .push(svc::FailFast::layer("HTTP Server", dispatch_timeout)),
                 )
                 .push(rt.metrics.http_errors.to_layer())
+                .push(ServerRescue::layer())
                 .push_on_service(
                     svc::layers()
-                        .push(ServerRescue::layer())
                         .push(http_tracing::server(
                             rt.span_sink.clone(),
                             super::trace_labels(),
@@ -87,7 +81,8 @@ impl<H> Inbound<H> {
                 .check_new_service::<T, http::Request<_>>()
                 .instrument(|t: &T| debug_span!("http", v = %Param::<Version>::param(t)))
                 .push(http::NewServeHttp::layer(h2_settings, rt.drain.clone()))
-                .push(svc::BoxNewService::layer())
+                .push_on_service(svc::BoxService::layer())
+                .push(svc::ArcNewService::layer())
         })
     }
 }
@@ -96,8 +91,34 @@ impl<H> Inbound<H> {
 
 impl ServerRescue {
     /// Synthesizes responses for HTTP requests that encounter proxy errors.
-    pub fn layer() -> errors::respond::Layer<Self> {
-        errors::respond::NewRespond::layer(Self)
+    pub fn layer<N>(
+    ) -> impl svc::layer::Layer<N, Service = errors::NewRespondService<Self, Self, N>> + Clone {
+        errors::respond::layer(Self)
+    }
+}
+
+impl<T> ExtractParam<Self, T> for ServerRescue {
+    #[inline]
+    fn extract_param(&self, _: &T) -> Self {
+        *self
+    }
+}
+
+impl<T: Param<tls::ConditionalServerTls>> ExtractParam<errors::respond::EmitHeaders, T>
+    for ServerRescue
+{
+    #[inline]
+    fn extract_param(&self, t: &T) -> errors::respond::EmitHeaders {
+        // Only emit informational headers to meshed peers.
+        let emit = t
+            .param()
+            .value()
+            .map(|tls| match tls {
+                tls::ServerTls::Established { client_id, .. } => client_id.is_some(),
+                _ => false,
+            })
+            .unwrap_or(false);
+        errors::respond::EmitHeaders(emit)
     }
 }
 
@@ -119,7 +140,6 @@ impl errors::HttpRescue<Error> for ServerRescue {
         if cause.is::<errors::FailFastError>() {
             return Ok(errors::SyntheticHttpResponse::gateway_timeout(cause));
         }
-
         if cause.is::<errors::H2Error>() {
             return Err(error);
         }

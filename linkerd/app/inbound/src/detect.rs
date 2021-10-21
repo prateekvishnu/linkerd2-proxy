@@ -4,8 +4,8 @@ use crate::{
 };
 use linkerd_app_core::{
     detect, identity, io,
-    proxy::{http, identity::LocalCrtKey},
-    svc, tls,
+    proxy::http,
+    rustls, svc, tls,
     transport::{
         self,
         addrs::{ClientAddr, OrigDstAddr, Remote},
@@ -14,6 +14,7 @@ use linkerd_app_core::{
     Error, Infallible,
 };
 use std::{fmt::Debug, time};
+use tracing::info;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Forward {
@@ -49,8 +50,10 @@ struct ConfigureHttpDetect;
 #[derive(Clone)]
 struct TlsParams {
     timeout: tls::server::Timeout,
-    identity: Option<LocalCrtKey>,
+    identity: identity::LocalCrtKey,
 }
+
+type TlsIo<I> = tls::server::Io<rustls::ServerIo<tls::server::DetectIo<I>>, I>;
 
 // === impl Inbound ===
 
@@ -60,12 +63,7 @@ impl<N> Inbound<N> {
     pub(crate) fn push_detect<T, I, NSvc, F, FSvc>(
         self,
         forward: F,
-    ) -> Inbound<
-        svc::BoxNewService<
-            T,
-            impl svc::Service<I, Response = (), Error = Error, Future = impl Send>,
-        >,
-    >
+    ) -> Inbound<svc::ArcNewTcp<T, I>>
     where
         T: svc::Param<OrigDstAddr> + svc::Param<Remote<ClientAddr>> + svc::Param<AllowPolicy>,
         T: Clone + Send + 'static,
@@ -88,15 +86,7 @@ impl<N> Inbound<N> {
     /// Builds a stack that handles TLS protocol detection according to the port's policy. If the
     /// connection is determined to be TLS, the inner stack is used; otherwise the connection is
     /// passed to the provided 'forward' stack.
-    fn push_detect_tls<T, I, NSvc, F, FSvc>(
-        self,
-        forward: F,
-    ) -> Inbound<
-        svc::BoxNewService<
-            T,
-            impl svc::Service<I, Response = (), Error = Error, Future = impl Send>,
-        >,
-    >
+    fn push_detect_tls<T, I, NSvc, F, FSvc>(self, forward: F) -> Inbound<svc::ArcNewTcp<T, I>>
     where
         T: svc::Param<OrigDstAddr> + svc::Param<Remote<ClientAddr>> + svc::Param<AllowPolicy>,
         T: Clone + Send + 'static,
@@ -104,7 +94,7 @@ impl<N> Inbound<N> {
         I: Debug + Send + Sync + Unpin + 'static,
         N: svc::NewService<Tls, Service = NSvc>,
         N: Clone + Send + Sync + Unpin + 'static,
-        NSvc: svc::Service<tls::server::Io<I>, Response = ()>,
+        NSvc: svc::Service<TlsIo<I>, Response = ()>,
         NSvc: Send + Unpin + 'static,
         NSvc::Error: Into<Error>,
         NSvc::Future: Send,
@@ -119,7 +109,6 @@ impl<N> Inbound<N> {
 
             let detect_timeout = cfg.proxy.detect_protocol_timeout;
             detect
-                .check_new_service::<Tls, _>()
                 .push_switch(
                     // Ensure that the connection is authorized before proceeding with protocol
                     // detection.
@@ -148,12 +137,12 @@ impl<N> Inbound<N> {
                         .push_on_service(svc::MapTargetLayer::new(io::BoxedIo::new))
                         .into_inner(),
                 )
-                .check_new_service::<(tls::ConditionalServerTls, T), _>()
-                .push(tls::NewDetectTls::layer(TlsParams {
-                    timeout: tls::server::Timeout(detect_timeout),
-                    identity: rt.identity.clone(),
-                }))
-                .check_new_service::<T, I>()
+                .push(tls::NewDetectTls::<identity::LocalCrtKey, _, _>::layer(
+                    TlsParams {
+                        timeout: tls::server::Timeout(detect_timeout),
+                        identity: rt.identity.clone(),
+                    },
+                ))
                 .push_switch(
                     // If this port's policy indicates that authentication is not required and
                     // detection should be skipped, use the TCP stack directly.
@@ -175,24 +164,15 @@ impl<N> Inbound<N> {
                         .push_on_service(svc::MapTargetLayer::new(io::BoxedIo::new))
                         .into_inner(),
                 )
-                .check_new_service::<T, I>()
                 .push_on_service(svc::BoxService::layer())
-                .push(svc::BoxNewService::layer())
+                .push(svc::ArcNewService::layer())
         })
     }
 
     /// Builds a stack that handles HTTP detection once TLS detection has been performed. If the
     /// connection is determined to be HTTP, the inner stack is used; otherwise the connection is
     /// passed to the provided 'forward' stack.
-    fn push_detect_http<I, NSvc, F, FSvc>(
-        self,
-        forward: F,
-    ) -> Inbound<
-        svc::BoxNewService<
-            Tls,
-            impl svc::Service<I, Response = (), Error = Error, Future = impl Send>,
-        >,
-    >
+    fn push_detect_http<I, NSvc, F, FSvc>(self, forward: F) -> Inbound<svc::ArcNewTcp<Tls, I>>
     where
         I: io::AsyncRead + io::AsyncWrite + io::PeerAddr,
         I: Debug + Send + Sync + Unpin + 'static,
@@ -214,14 +194,39 @@ impl<N> Inbound<N> {
                 .push(transport::metrics::NewServer::layer(
                     rt.metrics.proxy.transport.clone(),
                 ))
-                .check_new_service::<Http, io::PrefixedIo<I>>()
                 .push_switch(
-                    |(http, Detect { tls, .. })| -> Result<_, Infallible> {
-                        match http {
-                            Some(http) => Ok(svc::Either::A(Http { http, tls })),
+                    |(detected, Detect { tls, .. })| -> Result<_, Infallible> {
+                        match detected {
+                            Ok(Some(http)) => Ok(svc::Either::A(Http { http, tls })),
+                            Ok(None) => Ok(svc::Either::B(tls)),
                             // When HTTP detection fails, forward the connection to the application as
                             // an opaque TCP stream.
-                            None => Ok(svc::Either::B(tls)),
+                            Err(timeout) => match tls.policy.protocol() {
+                                Protocol::Http1 => {
+                                    // If the protocol was hinted to be HTTP/1.1 but detection
+                                    // failed, we'll usually be handling HTTP/1, but we may actually
+                                    // be handling HTTP/2 via protocol upgrade. Our options are:
+                                    // handle the connection as HTTP/1, assuming it will be rare for
+                                    // a proxy to initiate TLS, etc and not send the 16B of
+                                    // connection header; or we can handle it as opaque--but there's
+                                    // no chance the server will be able to handle the H2 protocol
+                                    // upgrade. So, it seems best to assume it's HTTP/1 and let the
+                                    // proxy handle the protocol error if we're in an edge case.
+                                    info!(%timeout, "Handling connection as HTTP/1 due to policy");
+                                    Ok(svc::Either::A(Http {
+                                        http: http::Version::Http1,
+                                        tls,
+                                    }))
+                                }
+                                // Otherwise, the protocol hint must have been `Detect` or the
+                                // protocol was updated after detection was initiated, otherwise we
+                                // would have avoided detection below. Continue handling the
+                                // connection as if it were opaque.
+                                _ => {
+                                    info!(%timeout, "Handling connection as opaque");
+                                    Ok(svc::Either::B(tls))
+                                }
+                            },
                         }
                     },
                     svc::stack(forward)
@@ -233,15 +238,12 @@ impl<N> Inbound<N> {
                         .push(policy::NewAuthorizeTcp::layer(rt.metrics.tcp_authz.clone()))
                         .into_inner(),
                 )
-                .push_map_target(detect::allow_timeout)
-                .push(detect::NewDetectService::layer(ConfigureHttpDetect))
-                .check_new_service::<Detect, I>();
+                .push(detect::NewDetectService::layer(ConfigureHttpDetect));
 
             http.push_on_service(svc::MapTargetLayer::new(io::BoxedIo::new))
                 .push(transport::metrics::NewServer::layer(
                     rt.metrics.proxy.transport.clone(),
                 ))
-                .check_new_service::<Http, I>()
                 .push_switch(
                     // If we have a protocol hint, skip detection and just used the hinted HTTP
                     // version.
@@ -250,14 +252,20 @@ impl<N> Inbound<N> {
                             Protocol::Detect { timeout } => {
                                 return Ok(svc::Either::B(Detect { timeout, tls }));
                             }
-                            Protocol::Http1 => {
-                                // HTTP/1 services may actually be transported over HTTP/2
-                                // connections between proxies, so we have to do detection.
+                            // Meshed HTTP/1 services may actually be transported over HTTP/2 connections
+                            // between proxies, so we have to do detection.
+                            //
+                            // TODO(ver) outbound clients should hint this with ALPN so we don't
+                            // have to detect this situation.
+                            Protocol::Http1 if tls.status.is_some() => {
                                 return Ok(svc::Either::B(Detect {
                                     timeout: detect_timeout,
                                     tls,
                                 }));
                             }
+                            // Unmeshed services don't use protocol upgrading, so we can use the
+                            // hint without further detection.
+                            Protocol::Http1 => http::Version::Http1,
                             Protocol::Http2 | Protocol::Grpc => http::Version::H2,
                             _ => unreachable!("opaque protocols must not hit the HTTP stack"),
                         };
@@ -265,7 +273,8 @@ impl<N> Inbound<N> {
                     },
                     detect.into_inner(),
                 )
-                .push(svc::BoxNewService::layer())
+                .push_on_service(svc::BoxService::layer())
+                .push(svc::ArcNewService::layer())
         })
     }
 }
@@ -283,9 +292,9 @@ impl From<(Permit, Tls)> for Forward {
     }
 }
 
-impl svc::Param<u16> for Forward {
-    fn param(&self) -> u16 {
-        self.orig_dst_addr.as_ref().port()
+impl svc::Param<Remote<ServerAddr>> for Forward {
+    fn param(&self) -> Remote<ServerAddr> {
+        Remote(ServerAddr(self.orig_dst_addr.into()))
     }
 }
 
@@ -420,9 +429,9 @@ impl<T> svc::ExtractParam<tls::server::Timeout, T> for TlsParams {
     }
 }
 
-impl<T> svc::ExtractParam<Option<LocalCrtKey>, T> for TlsParams {
+impl<T> svc::ExtractParam<identity::LocalCrtKey, T> for TlsParams {
     #[inline]
-    fn extract_param(&self, _: &T) -> Option<LocalCrtKey> {
+    fn extract_param(&self, _: &T) -> identity::LocalCrtKey {
         self.identity.clone()
     }
 }
@@ -636,12 +645,12 @@ mod tests {
         Inbound::new(test_util::default_config(), test_util::runtime().0)
     }
 
-    fn new_panic<T, I: 'static>(msg: &'static str) -> svc::BoxNewTcp<T, I> {
-        svc::BoxNewService::new(move |_| -> svc::BoxTcp<I> { panic!("{}", msg) })
+    fn new_panic<T, I: 'static>(msg: &'static str) -> svc::ArcNewTcp<T, I> {
+        svc::ArcNewService::new(move |_| -> svc::BoxTcp<I> { panic!("{}", msg) })
     }
 
-    fn new_ok<T>() -> svc::BoxNewTcp<T, io::BoxedIo> {
-        svc::BoxNewService::new(|_| svc::BoxService::new(svc::mk(|_| future::ok::<(), Error>(()))))
+    fn new_ok<T>() -> svc::ArcNewTcp<T, io::BoxedIo> {
+        svc::ArcNewService::new(|_| svc::BoxService::new(svc::mk(|_| future::ok::<(), Error>(()))))
     }
 
     #[derive(Clone, Debug)]

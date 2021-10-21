@@ -26,23 +26,18 @@ fn build_server<I>(
     rt: ProxyRuntime,
     profiles: resolver::Profiles,
     connect: Connect<Remote<ServerAddr>>,
-) -> svc::BoxNewTcp<Target, I>
+) -> svc::ArcNewTcp<Target, I>
 where
     I: io::AsyncRead + io::AsyncWrite + io::PeerAddr + Send + Unpin + 'static,
 {
     Inbound::new(cfg, rt)
         .with_stack(connect)
         .map_stack(|cfg, _, s| {
-            s.push_map_target(|p| Remote(ServerAddr(([127, 0, 0, 1], p).into())))
-                .push_map_target(|t| Param::<u16>::param(&t))
+            s.push_map_target(|t| Param::<Remote<ServerAddr>>::param(&t))
                 .push_connect_timeout(cfg.proxy.connect.timeout)
         })
         .push_http_router(profiles)
         .push_http_server()
-        .map_stack(|_, _, s| {
-            s.push_on_service(svc::BoxService::layer())
-                .push(svc::BoxNewService::layer())
-        })
         .into_inner()
 }
 
@@ -64,7 +59,7 @@ async fn unmeshed_http1_hello_world() {
     // Build the outbound server
     let cfg = default_config();
     let (rt, _shutdown) = runtime();
-    let server = build_server(cfg, rt, profiles, connect).new_service(Target::HTTP1);
+    let server = build_server(cfg, rt, profiles, connect).new_service(Target::UNMESHED_HTTP1);
     let (mut client, bg) = http_util::connect_and_accept(&mut client, server).await;
 
     let req = Request::builder()
@@ -101,7 +96,7 @@ async fn downgrade_origin_form() {
     // Build the outbound server
     let cfg = default_config();
     let (rt, _shutdown) = runtime();
-    let server = build_server(cfg, rt, profiles, connect).new_service(Target::H2);
+    let server = build_server(cfg, rt, profiles, connect).new_service(Target::UNMESHED_H2);
     let (mut client, bg) = http_util::connect_and_accept(&mut client, server).await;
 
     let req = Request::builder()
@@ -139,7 +134,7 @@ async fn downgrade_absolute_form() {
     // Build the outbound server
     let cfg = default_config();
     let (rt, _shutdown) = runtime();
-    let server = build_server(cfg, rt, profiles, connect).new_service(Target::H2);
+    let server = build_server(cfg, rt, profiles, connect).new_service(Target::UNMESHED_H2);
     let (mut client, bg) = http_util::connect_and_accept(&mut client, server).await;
 
     let req = Request::builder()
@@ -159,7 +154,7 @@ async fn downgrade_absolute_form() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn http1_bad_gateway_response_error_header() {
+async fn http1_bad_gateway_meshed_response_error_header() {
     let _trace = trace_init();
 
     // Build a mock connect that always errors.
@@ -174,7 +169,7 @@ async fn http1_bad_gateway_response_error_header() {
     profile_tx.send(profile::Profile::default()).unwrap();
     let cfg = default_config();
     let (rt, _shutdown) = runtime();
-    let server = build_server(cfg, rt, profiles, connect).new_service(Target::HTTP1);
+    let server = build_server(cfg, rt, profiles, connect).new_service(Target::meshed_http1());
     let (mut client, bg) = http_util::connect_and_accept(&mut client, server).await;
 
     // Send a request and assert that it is a BAD_GATEWAY with the expected
@@ -197,7 +192,44 @@ async fn http1_bad_gateway_response_error_header() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn http1_connect_timeout_response_error_header() {
+async fn http1_bad_gateway_unmeshed_response() {
+    let _trace = trace_init();
+
+    // Build a mock connect that always errors.
+    let connect = support::connect().endpoint_fn_boxed(Target::addr(), connect_error());
+
+    // Build a client using the connect that always errors so that responses
+    // are BAD_GATEWAY.
+    let mut client = ClientBuilder::new();
+    let profiles = profile::resolver();
+    let profile_tx =
+        profiles.profile_tx(NameAddr::from_str_and_port("foo.svc.cluster.local", 5550).unwrap());
+    profile_tx.send(profile::Profile::default()).unwrap();
+    let cfg = default_config();
+    let (rt, _shutdown) = runtime();
+    let server = build_server(cfg, rt, profiles, connect).new_service(Target::UNMESHED_HTTP1);
+    let (mut client, bg) = http_util::connect_and_accept(&mut client, server).await;
+
+    // Send a request and assert that it is a BAD_GATEWAY with the expected
+    // header message.
+    let req = Request::builder()
+        .method(http::Method::GET)
+        .uri("http://foo.svc.cluster.local:5550")
+        .body(Body::default())
+        .unwrap();
+    let response = http_util::http_request(&mut client, req).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::BAD_GATEWAY);
+    assert!(
+        response.headers().get(L5D_PROXY_ERROR).is_none(),
+        "response must not contain L5D_PROXY_ERROR header"
+    );
+
+    drop(client);
+    bg.await.expect("background task failed");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn http1_connect_timeout_meshed_response_error_header() {
     let _trace = trace_init();
     tokio::time::pause();
 
@@ -215,7 +247,7 @@ async fn http1_connect_timeout_response_error_header() {
     profile_tx.send(profile::Profile::default()).unwrap();
     let cfg = default_config();
     let (rt, _shutdown) = runtime();
-    let server = build_server(cfg, rt, profiles, connect).new_service(Target::HTTP1);
+    let server = build_server(cfg, rt, profiles, connect).new_service(Target::meshed_http1());
     let (mut client, bg) = http_util::connect_and_accept(&mut client, server).await;
 
     // Send a request and assert that it is a GATEWAY_TIMEOUT with the
@@ -238,7 +270,47 @@ async fn http1_connect_timeout_response_error_header() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn h2_response_error_header() {
+async fn http1_connect_timeout_unmeshed_response_error_header() {
+    let _trace = trace_init();
+    tokio::time::pause();
+
+    // Build a mock connect that sleeps longer than the default inbound
+    // connect timeout.
+    let server = hyper::server::conn::Http::new();
+    let connect = support::connect().endpoint(Target::addr(), connect_timeout(server));
+
+    // Build a client using the connect that always sleeps so that responses
+    // are GATEWAY_TIMEOUT.
+    let mut client = ClientBuilder::new();
+    let profiles = profile::resolver();
+    let profile_tx =
+        profiles.profile_tx(NameAddr::from_str_and_port("foo.svc.cluster.local", 5550).unwrap());
+    profile_tx.send(profile::Profile::default()).unwrap();
+    let cfg = default_config();
+    let (rt, _shutdown) = runtime();
+    let server = build_server(cfg, rt, profiles, connect).new_service(Target::UNMESHED_HTTP1);
+    let (mut client, bg) = http_util::connect_and_accept(&mut client, server).await;
+
+    // Send a request and assert that it is a GATEWAY_TIMEOUT with the
+    // expected header message.
+    let req = Request::builder()
+        .method(http::Method::GET)
+        .uri("http://foo.svc.cluster.local:5550")
+        .body(Body::default())
+        .unwrap();
+    let response = http_util::http_request(&mut client, req).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::GATEWAY_TIMEOUT);
+    assert!(
+        response.headers().get(L5D_PROXY_ERROR).is_none(),
+        "response must not contain L5D_PROXY_ERROR header"
+    );
+
+    drop(client);
+    bg.await.expect("background task failed");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn h2_response_meshed_error_header() {
     let _trace = trace_init();
 
     // Build a mock connect that always errors.
@@ -253,7 +325,7 @@ async fn h2_response_error_header() {
     profile_tx.send(profile::Profile::default()).unwrap();
     let cfg = default_config();
     let (rt, _shutdown) = runtime();
-    let server = build_server(cfg, rt, profiles, connect).new_service(Target::H2);
+    let server = build_server(cfg, rt, profiles, connect).new_service(Target::meshed_h2());
     let (mut client, bg) = http_util::connect_and_accept(&mut client, server).await;
 
     // Send a request and assert that it is SERVICE_UNAVAILABLE with the
@@ -279,7 +351,7 @@ async fn h2_response_error_header() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn grpc_response_error_header() {
+async fn h2_response_unmeshed_error_header() {
     let _trace = trace_init();
 
     // Build a mock connect that always errors.
@@ -294,7 +366,47 @@ async fn grpc_response_error_header() {
     profile_tx.send(profile::Profile::default()).unwrap();
     let cfg = default_config();
     let (rt, _shutdown) = runtime();
-    let server = build_server(cfg, rt, profiles, connect).new_service(Target::H2);
+    let server = build_server(cfg, rt, profiles, connect).new_service(Target::UNMESHED_H2);
+    let (mut client, bg) = http_util::connect_and_accept(&mut client, server).await;
+
+    // Send a request and assert that it is SERVICE_UNAVAILABLE with the
+    // expected header message.
+    let req = Request::builder()
+        .method(http::Method::GET)
+        .uri("http://foo.svc.cluster.local:5550")
+        .body(Body::default())
+        .unwrap();
+    let response = http_util::http_request(&mut client, req).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::GATEWAY_TIMEOUT);
+    assert!(
+        response.headers().get(L5D_PROXY_ERROR).is_none(),
+        "response must not contain L5D_PROXY_ERROR header"
+    );
+
+    // Drop the client and discard the result of awaiting the proxy background
+    // task. The result is discarded because it hits an error that is related
+    // to the mock implementation and has no significance to the test.
+    drop(client);
+    let _ = bg.await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn grpc_meshed_response_error_header() {
+    let _trace = trace_init();
+
+    // Build a mock connect that always errors.
+    let connect = support::connect().endpoint_fn_boxed(Target::addr(), connect_error());
+
+    // Build a client using the connect that always errors.
+    let mut client = ClientBuilder::new();
+    client.http2_only(true);
+    let profiles = profile::resolver();
+    let profile_tx =
+        profiles.profile_tx(NameAddr::from_str_and_port("foo.svc.cluster.local", 5550).unwrap());
+    profile_tx.send(profile::Profile::default()).unwrap();
+    let cfg = default_config();
+    let (rt, _shutdown) = runtime();
+    let server = build_server(cfg, rt, profiles, connect).new_service(Target::meshed_h2());
     let (mut client, bg) = http_util::connect_and_accept(&mut client, server).await;
 
     // Send a request and assert that it is OK with the expected header
@@ -312,6 +424,47 @@ async fn grpc_response_error_header() {
         .get(L5D_PROXY_ERROR)
         .expect("response did not contain L5D_PROXY_ERROR header");
     assert_eq!(message, "HTTP Logical service in fail-fast");
+
+    // Drop the client and discard the result of awaiting the proxy background
+    // task. The result is discarded because it hits an error that is related
+    // to the mock implementation and has no significance to the test.
+    drop(client);
+    let _ = bg.await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn grpc_unmeshed_response_error_header() {
+    let _trace = trace_init();
+
+    // Build a mock connect that always errors.
+    let connect = support::connect().endpoint_fn_boxed(Target::addr(), connect_error());
+
+    // Build a client using the connect that always errors.
+    let mut client = ClientBuilder::new();
+    client.http2_only(true);
+    let profiles = profile::resolver();
+    let profile_tx =
+        profiles.profile_tx(NameAddr::from_str_and_port("foo.svc.cluster.local", 5550).unwrap());
+    profile_tx.send(profile::Profile::default()).unwrap();
+    let cfg = default_config();
+    let (rt, _shutdown) = runtime();
+    let server = build_server(cfg, rt, profiles, connect).new_service(Target::UNMESHED_H2);
+    let (mut client, bg) = http_util::connect_and_accept(&mut client, server).await;
+
+    // Send a request and assert that it is OK with the expected header
+    // message.
+    let req = Request::builder()
+        .method(http::Method::GET)
+        .uri("http://foo.svc.cluster.local:5550")
+        .header(http::header::CONTENT_TYPE, "application/grpc")
+        .body(Body::default())
+        .unwrap();
+    let response = http_util::http_request(&mut client, req).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::OK);
+    assert!(
+        response.headers().get(L5D_PROXY_ERROR).is_none(),
+        "response must not contain L5D_PROXY_ERROR header"
+    );
 
     // Drop the client and discard the result of awaiting the proxy background
     // task. The result is discarded because it hits an error that is related
@@ -365,19 +518,53 @@ fn connect_timeout(
                 // about returning a service here.
                 unreachable!();
             }
-            .instrument(span),
+            .instrument(span.or_current()),
         )
     })
 }
 
 #[derive(Clone, Debug)]
-struct Target(http::Version);
+struct Target(http::Version, tls::ConditionalServerTls);
 
 // === impl Target ===
 
 impl Target {
-    const HTTP1: Self = Self(http::Version::Http1);
-    const H2: Self = Self(http::Version::H2);
+    const UNMESHED_HTTP1: Self = Self(
+        http::Version::Http1,
+        tls::ConditionalServerTls::None(tls::NoServerTls::NoClientHello),
+    );
+    const UNMESHED_H2: Self = Self(
+        http::Version::H2,
+        tls::ConditionalServerTls::None(tls::NoServerTls::NoClientHello),
+    );
+
+    fn meshed_http1() -> Self {
+        Self(
+            http::Version::Http1,
+            tls::ConditionalServerTls::Some(tls::ServerTls::Established {
+                client_id: Some(tls::ClientId(
+                    "foosa.barns.serviceaccount.identity.linkerd.cluster.local"
+                        .parse()
+                        .unwrap(),
+                )),
+                negotiated_protocol: None,
+            }),
+        )
+    }
+
+    fn meshed_h2() -> Self {
+        Self(
+            http::Version::H2,
+            tls::ConditionalServerTls::Some(tls::ServerTls::Established {
+                client_id: Some(tls::ClientId(
+                    "foosa.barns.serviceaccount.identity.linkerd.cluster.local"
+                        .parse()
+                        .unwrap(),
+                )),
+                negotiated_protocol: None,
+            }),
+        )
+    }
 
     fn addr() -> SocketAddr {
         ([127, 0, 0, 1], 80).into()
@@ -410,7 +597,7 @@ impl svc::Param<http::Version> for Target {
 
 impl svc::Param<tls::ConditionalServerTls> for Target {
     fn param(&self) -> tls::ConditionalServerTls {
-        tls::ConditionalServerTls::None(tls::NoServerTls::Disabled)
+        self.1.clone()
     }
 }
 

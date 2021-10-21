@@ -8,7 +8,7 @@ use linkerd_app_core::{
         resolve::map_endpoint,
         tcp,
     },
-    svc, Conditional, Error, Infallible,
+    svc, Error, Infallible,
 };
 use tracing::debug_span;
 
@@ -24,7 +24,7 @@ where
         self,
         resolve: R,
     ) -> Outbound<
-        svc::BoxNewService<
+        svc::ArcNewService<
             Logical,
             impl svc::Service<I, Response = (), Error = Error, Future = impl Send> + Clone,
         >,
@@ -48,14 +48,12 @@ where
                 ..
             } = config.proxy;
 
-            let identity_disabled = rt.identity.is_none();
             let resolve = svc::stack(resolve.into_service())
                 .check_service::<ConcreteAddr>()
                 .push_request_filter(|c: Concrete| Ok::<_, Infallible>(c.resolve))
                 .push(svc::layer::mk(move |inner| {
                     map_endpoint::Resolve::new(
                         endpoint::FromMetadata {
-                            identity_disabled,
                             inbound_ips: config.inbound_ips.clone(),
                         },
                         inner,
@@ -66,13 +64,12 @@ where
 
             connect
                 .push_make_thunk()
-                .instrument(|t: &Endpoint| match t.tls.as_ref() {
-                    Conditional::Some(tls) => {
-                        debug_span!("endpoint", server.addr = %t.addr, server.id = ?tls.server_id)
-                    }
-                    Conditional::None(_) => {
-                        debug_span!("endpoint", server.addr = %t.addr)
-                    }
+                .instrument(|t: &Endpoint| {
+                    debug_span!(
+                        "endpoint",
+                        server.addr = %t.addr,
+                        server.id = t.tls.value().map(|tls| tracing::field::display(&tls.server_id)),
+                    )
                 })
                 .push(resolve::layer(resolve, config.proxy.cache_max_idle_age * 2))
                 .push_on_service(
@@ -92,6 +89,7 @@ where
                 )
                 .into_new_service()
                 .push_map_target(Concrete::from)
+                .push(svc::ArcNewService::layer())
                 .check_new_service::<(ConcreteAddr, Logical), I>()
                 .push(profiles::split::layer())
                 .push_on_service(
@@ -110,7 +108,7 @@ where
                 .check_new_service::<Logical, I>()
                 .instrument(|_: &Logical| debug_span!("tcp"))
                 .check_new_service::<Logical, I>()
-                .push(svc::BoxNewService::layer())
+                .push(svc::ArcNewService::layer())
         })
     }
 }
@@ -121,9 +119,10 @@ mod tests {
     use crate::test_util::*;
     use io::AsyncWriteExt;
     use linkerd_app_core::{
+        errors::FailFastError,
         io::{self, AsyncReadExt},
         profiles::{LogicalAddr, Profile},
-        svc::{self, timeout::FailFastError, NewService, ServiceExt},
+        svc::{self, NewService, ServiceExt},
         transport::addrs::*,
     };
     use std::net::SocketAddr;

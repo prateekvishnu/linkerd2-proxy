@@ -15,6 +15,7 @@ use std::{str::FromStr, time::Duration};
 pub(crate) fn default_config() -> Config {
     Config {
         ingress_mode: false,
+        emit_headers: true,
         allow_discovery: IpMatch::new(Some(IpNet::from_str("0.0.0.0/0").unwrap())).into(),
         proxy: config::ProxyConfig {
             server: config::ServerConfig {
@@ -52,7 +53,7 @@ pub(crate) fn runtime() -> (ProxyRuntime, drain::Signal) {
     let (tap, _) = tap::new();
     let (metrics, _) = metrics::Metrics::new(std::time::Duration::from_secs(10));
     let runtime = ProxyRuntime {
-        identity: None,
+        identity: linkerd_proxy_identity::LocalCrtKey::default_for_test(),
         metrics: metrics.proxy,
         tap,
         span_sink: None,

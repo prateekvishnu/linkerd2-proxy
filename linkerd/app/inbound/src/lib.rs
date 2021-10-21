@@ -21,9 +21,9 @@ use linkerd_app_core::{
     config::{ConnectConfig, ProxyConfig},
     drain,
     http_tracing::OpenCensusSink,
+    identity::LocalCrtKey,
     io,
-    proxy::tcp,
-    proxy::{identity::LocalCrtKey, tap},
+    proxy::{tap, tcp},
     svc,
     transport::{self, Remote, ServerAddr},
     Error, NameMatch, ProxyRuntime,
@@ -41,6 +41,7 @@ pub struct Config {
     pub proxy: ProxyConfig,
     pub policy: policy::Config,
     pub profile_idle_timeout: Duration,
+    pub allowed_ips: transport::AllowIps,
 }
 
 #[derive(Clone)]
@@ -53,7 +54,7 @@ pub struct Inbound<S> {
 #[derive(Clone)]
 struct Runtime {
     metrics: Metrics,
-    identity: Option<LocalCrtKey>,
+    identity: LocalCrtKey,
     tap: tap::Registry,
     span_sink: OpenCensusSink,
     drain: drain::Watch,
@@ -81,8 +82,8 @@ impl<S> Inbound<S> {
         &self.config
     }
 
-    pub fn identity(&self) -> Option<&LocalCrtKey> {
-        self.runtime.identity.as_ref()
+    pub fn identity(&self) -> &LocalCrtKey {
+        &self.runtime.identity
     }
 
     pub fn proxy_metrics(&self) -> &metrics::Proxy {
@@ -163,7 +164,7 @@ impl Inbound<()> {
             > + Clone,
     >
     where
-        T: svc::Param<u16> + 'static,
+        T: svc::Param<Remote<ServerAddr>> + 'static,
     {
         self.map_stack(|config, _, _| {
             // Establishes connections to remote peers (for both TCP
@@ -183,11 +184,12 @@ impl Inbound<()> {
                 .push_connect_timeout(*timeout)
                 // Prevent connections that would target the inbound proxy port from looping.
                 .push_request_filter(move |t: T| {
-                    let port = t.param();
+                    let addr = t.param();
+                    let port = addr.port();
                     if port == proxy_port {
                         return Err(Loop(port));
                     }
-                    Ok(Remote(ServerAddr(([127, 0, 0, 1], port).into())))
+                    Ok(addr)
                 })
         })
     }
@@ -204,7 +206,7 @@ impl<S> Inbound<S> {
     pub fn push_tcp_forward<T, I>(
         self,
     ) -> Inbound<
-        svc::BoxNewService<
+        svc::ArcNewService<
             T,
             impl svc::Service<I, Response = (), Error = Error, Future = impl Send> + Clone,
         >,
@@ -230,7 +232,8 @@ impl<S> Inbound<S> {
                         .push(drain::Retain::layer(rt.drain.clone())),
                 )
                 .instrument(|_: &_| debug_span!("tcp"))
-                .push(svc::BoxNewService::layer())
+                .push(svc::ArcNewService::layer())
+                .check_new::<T>()
         })
     }
 }

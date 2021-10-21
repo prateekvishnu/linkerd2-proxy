@@ -8,18 +8,8 @@ mod uptime;
 use self::uptime::Uptime;
 use linkerd_error::Error;
 use std::{env, str};
-pub use tokio_trace::tasks::TaskList;
-use tokio_trace::tasks::TasksLayer;
-use tracing::Dispatch;
-use tracing_subscriber::{
-    fmt::format::{self, DefaultFields},
-    layer::Layered,
-    prelude::*,
-    reload, EnvFilter,
-};
-
-type Registry =
-    Layered<reload::Layer<EnvFilter, tracing_subscriber::Registry>, tracing_subscriber::Registry>;
+use tracing::{Dispatch, Subscriber};
+use tracing_subscriber::{fmt::format, prelude::*, registry::LookupSpan, reload, EnvFilter, Layer};
 
 const ENV_LOG_LEVEL: &str = "LINKERD2_PROXY_LOG";
 const ENV_LOG_FORMAT: &str = "LINKERD2_PROXY_LOG_FORMAT";
@@ -35,23 +25,14 @@ pub struct Settings {
 }
 
 #[derive(Clone)]
-pub struct Handle(Inner);
-
-#[derive(Clone)]
-enum Inner {
-    Disabled,
-    Enabled {
-        level: level::Handle,
-        tasks: TaskList,
-    },
-}
+pub struct Handle(Option<level::Handle>);
 
 /// Initialize tracing and logging with the value of the `ENV_LOG`
 /// environment variable as the verbosity-level filter.
 pub fn init() -> Result<Handle, Error> {
     let (dispatch, handle) = match Settings::from_env() {
         Some(s) => s.build(),
-        None => return Ok(Handle(Inner::Disabled)),
+        None => return Ok(Handle(None)),
     };
 
     // Set the default subscriber.
@@ -110,17 +91,11 @@ impl Settings {
             .to_uppercase()
     }
 
-    fn mk_registry(&self) -> (Registry, level::Handle) {
-        let log_level = self.filter.as_deref().unwrap_or(DEFAULT_LOG_LEVEL);
-        let (filter, level) = reload::Layer::new(EnvFilter::new(log_level));
-        let reg = tracing_subscriber::registry().with(filter);
-        (reg, level::Handle::new(level))
-    }
-
-    fn mk_json(&self, registry: Registry) -> (Dispatch, TaskList) {
-        let (tasks, tasks_layer) = TasksLayer::<format::JsonFields>::new();
-        let registry = registry.with(tasks_layer);
-
+    fn mk_json<S>(&self) -> Box<dyn Layer<S> + Send + Sync + 'static>
+    where
+        S: Subscriber + for<'span> LookupSpan<'span>,
+        S: Send + Sync,
+    {
         let fmt = tracing_subscriber::fmt::format()
             .with_timer(Uptime::starting_now())
             .with_thread_ids(!self.is_test)
@@ -139,41 +114,45 @@ impl Settings {
             // use the JSON field formatter.
             .fmt_fields(format::JsonFields::default());
 
-        let dispatch = if self.is_test {
-            registry.with(fmt.with_test_writer()).into()
+        if self.is_test {
+            Box::new(fmt.with_test_writer())
         } else {
-            registry.with(fmt).into()
-        };
-
-        (dispatch, tasks)
+            Box::new(fmt)
+        }
     }
 
-    fn mk_plain(&self, registry: Registry) -> (Dispatch, TaskList) {
-        let (tasks, tasks_layer) = TasksLayer::<DefaultFields>::new();
-        let registry = registry.with(tasks_layer);
-
+    fn mk_plain<S>(&self) -> Box<dyn Layer<S> + Send + Sync + 'static>
+    where
+        S: Subscriber + for<'span> LookupSpan<'span>,
+        S: Send + Sync,
+    {
         let fmt = tracing_subscriber::fmt::format()
             .with_timer(Uptime::starting_now())
             .with_thread_ids(!self.is_test);
         let fmt = tracing_subscriber::fmt::layer().event_format(fmt);
-        let dispatch = if self.is_test {
-            registry.with(fmt.with_test_writer()).into()
+        if self.is_test {
+            Box::new(fmt.with_test_writer())
         } else {
-            registry.with(fmt).into()
-        };
-
-        (dispatch, tasks)
+            Box::new(fmt)
+        }
     }
 
     pub fn build(self) -> (Dispatch, Handle) {
-        let (registry, level) = self.mk_registry();
+        let log_level = self.filter.as_deref().unwrap_or(DEFAULT_LOG_LEVEL);
+        let (filter, level) = reload::Layer::new(EnvFilter::new(log_level));
+        let level = level::Handle::new(level);
 
-        let (dispatch, tasks) = match self.format().as_ref() {
-            "JSON" => self.mk_json(registry),
-            _ => self.mk_plain(registry),
+        let logger = match self.format().as_ref() {
+            "JSON" => self.mk_json(),
+            _ => self.mk_plain(),
         };
 
-        (dispatch, Handle(Inner::Enabled { level, tasks }))
+        let dispatch = tracing_subscriber::registry()
+            .with(filter)
+            .with(logger)
+            .into();
+
+        (dispatch, Handle(Some(level)))
     }
 }
 
@@ -182,20 +161,10 @@ impl Settings {
 impl Handle {
     /// Returns a new `handle` with tracing disabled.
     pub fn disabled() -> Self {
-        Self(Inner::Disabled)
+        Self(None)
     }
 
     pub fn level(&self) -> Option<&level::Handle> {
-        match self.0 {
-            Inner::Enabled { ref level, .. } => Some(level),
-            Inner::Disabled => None,
-        }
-    }
-
-    pub fn tasks(&self) -> Option<&TaskList> {
-        match self.0 {
-            Inner::Enabled { ref tasks, .. } => Some(tasks),
-            Inner::Disabled => None,
-        }
+        self.0.as_ref()
     }
 }

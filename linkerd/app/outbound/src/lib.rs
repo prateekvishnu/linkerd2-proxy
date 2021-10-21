@@ -23,11 +23,11 @@ use linkerd_app_core::{
     config::ProxyConfig,
     drain,
     http_tracing::OpenCensusSink,
+    identity::LocalCrtKey,
     io, profiles,
     proxy::{
         api_resolve::{ConcreteAddr, Metadata},
         core::Resolve,
-        identity::LocalCrtKey,
         tap,
     },
     serve,
@@ -58,6 +58,9 @@ pub struct Config {
     // forwarded without discovery/routing/mTLS.
     pub ingress_mode: bool,
     pub inbound_ips: Arc<HashSet<IpAddr>>,
+
+    // Whether the proxy may include informational headers on HTTP responses.
+    pub emit_headers: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -70,7 +73,7 @@ pub struct Outbound<S> {
 #[derive(Clone, Debug)]
 struct Runtime {
     metrics: Metrics,
-    identity: Option<LocalCrtKey>,
+    identity: LocalCrtKey,
     tap: tap::Registry,
     span_sink: OpenCensusSink,
     drain: drain::Watch,
@@ -123,11 +126,7 @@ impl<S> Outbound<S> {
     }
 
     fn no_tls_reason(&self) -> tls::NoClientTls {
-        if self.runtime.identity.is_none() {
-            tls::NoClientTls::Disabled
-        } else {
-            tls::NoClientTls::NotProvidedByServiceDiscovery
-        }
+        tls::NoClientTls::NotProvidedByServiceDiscovery
     }
 
     pub fn push<L: svc::Layer<S>>(self, layer: L) -> Outbound<L::Service> {

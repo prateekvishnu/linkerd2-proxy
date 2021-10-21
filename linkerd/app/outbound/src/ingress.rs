@@ -45,12 +45,12 @@ const DST_OVERRIDE_HEADER: &str = "l5d-dst-override";
 
 // === impl Outbound ===
 
-impl Outbound<svc::BoxNewHttp<http::Endpoint>> {
+impl Outbound<svc::ArcNewHttp<http::Endpoint>> {
     /// Routes HTTP requests according to the l5d-dst-override header.
     ///
     /// This is only intended for Ingress configurations, where we assume all
     /// outbound traffic is HTTP.
-    pub fn into_ingress<T, I, P, R>(self, profiles: P, resolve: R) -> svc::BoxNewTcp<T, I>
+    pub fn into_ingress<T, I, P, R>(self, profiles: P, resolve: R) -> svc::ArcNewTcp<T, I>
     where
         T: Param<OrigDstAddr> + Clone + Send + Sync + 'static,
         I: io::AsyncRead + io::AsyncWrite + io::PeerAddr + std::fmt::Debug + Send + Unpin + 'static,
@@ -176,6 +176,7 @@ impl Outbound<svc::BoxNewHttp<http::Endpoint>> {
                     .instrument(|_: &_| info_span!("forward"))
                     .into_inner(),
             )
+            .push(svc::ArcNewService::layer())
             // Obtain a new inner service for each request. Override stacks are cached, as they
             // depend on discovery that should not be performed many times. Forwarding stacks are
             // not cached explicitly, as there are no real resources we need to share across
@@ -208,8 +209,11 @@ impl Outbound<svc::BoxNewHttp<http::Endpoint>> {
                     // Otherwise, the inner service is always ready (because it's a router).
                     .push(svc::ConcurrencyLimitLayer::new(max_in_flight_requests))
                     .push(svc::FailFast::layer("Ingress server", dispatch_timeout))
-                    .push(rt.metrics.http_errors.to_layer())
-                    .push(http::ServerRescue::layer())
+                    .push(rt.metrics.http_errors.to_layer()),
+            )
+            .push(http::ServerRescue::layer(config.emit_headers))
+            .push_on_service(
+                svc::layers()
                     .push(http_tracing::server(rt.span_sink, trace_labels()))
                     .push(http::BoxResponse::layer())
                     .push(http::BoxRequest::layer()),
@@ -222,6 +226,7 @@ impl Outbound<svc::BoxNewHttp<http::Endpoint>> {
             })
             .push_cache(cache_max_idle_age)
             .push_map_target(detect::allow_timeout)
+            .push(svc::ArcNewService::layer())
             .push(detect::NewDetectService::layer(detect_http))
             .push(transport::metrics::NewServer::layer(
                 rt.metrics.proxy.transport.clone(),
@@ -233,7 +238,7 @@ impl Outbound<svc::BoxNewHttp<http::Endpoint>> {
             })
             .push(rt.metrics.tcp_errors.to_layer())
             .push_on_service(svc::BoxService::layer())
-            .push(svc::BoxNewService::layer())
+            .push(svc::ArcNewService::layer())
             .check_new_service::<T, I>()
             .into_inner()
     }

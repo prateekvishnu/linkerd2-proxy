@@ -28,7 +28,7 @@ impl<N> Inbound<N> {
         proxy_port: u16,
         policies: impl CheckPolicy + Clone + Send + Sync + 'static,
         direct: D,
-    ) -> Inbound<svc::BoxNewTcp<T, I>>
+    ) -> Inbound<svc::ArcNewTcp<T, I>>
     where
         T: svc::Param<Remote<ClientAddr>> + svc::Param<OrigDstAddr>,
         T: Clone + Send + 'static,
@@ -44,7 +44,7 @@ impl<N> Inbound<N> {
         DSvc::Error: Into<Error>,
         DSvc::Future: Send,
     {
-        self.map_stack(|_, rt, accept| {
+        self.map_stack(|cfg, rt, accept| {
             accept
                 .push_switch(
                     // Switch to the `direct` stack when a connection's original destination is the
@@ -67,6 +67,7 @@ impl<N> Inbound<N> {
                     direct,
                 )
                 .check_new_service::<T, I>()
+                .push_request_filter(cfg.allowed_ips.clone())
                 .push(rt.metrics.tcp_errors.to_layer())
                 .check_new_service::<T, I>()
                 .instrument(|t: &T| {
@@ -74,7 +75,7 @@ impl<N> Inbound<N> {
                     info_span!("server", port = addr.port())
                 })
                 .push_on_service(svc::BoxService::layer())
-                .push(svc::BoxNewService::layer())
+                .push(svc::ArcNewService::layer())
         })
     }
 }
@@ -176,12 +177,12 @@ mod tests {
         Inbound::new(test_util::default_config(), test_util::runtime().0)
     }
 
-    fn new_panic<T>(msg: &'static str) -> svc::BoxNewTcp<T, io::DuplexStream> {
-        svc::BoxNewService::new(move |_| panic!("{}", msg))
+    fn new_panic<T>(msg: &'static str) -> svc::ArcNewTcp<T, io::DuplexStream> {
+        svc::ArcNewService::new(move |_| panic!("{}", msg))
     }
 
-    fn new_ok<T>() -> svc::BoxNewTcp<T, io::DuplexStream> {
-        svc::BoxNewService::new(|_| svc::BoxService::new(svc::mk(|_| future::ok::<(), Error>(()))))
+    fn new_ok<T>() -> svc::ArcNewTcp<T, io::DuplexStream> {
+        svc::ArcNewService::new(|_| svc::BoxService::new(svc::mk(|_| future::ok::<(), Error>(()))))
     }
 
     #[derive(Clone, Debug)]

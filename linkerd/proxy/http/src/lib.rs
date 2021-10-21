@@ -33,7 +33,8 @@ pub use self::{
     override_authority::{AuthorityOverride, NewOverrideAuthority},
     retain::Retain,
     server::NewServeHttp,
-    timeout::MakeTimeoutLayer,
+    strip_header::StripHeader,
+    timeout::{NewTimeout, ResponseTimeout, ResponseTimeoutError},
     version::Version,
 };
 pub use http::{

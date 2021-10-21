@@ -13,7 +13,7 @@ use linkerd_app_core::{
 use tracing::debug_span;
 
 impl<E> Outbound<E> {
-    pub fn push_http_logical<B, ESvc, R>(self, resolve: R) -> Outbound<svc::BoxNewHttp<Logical, B>>
+    pub fn push_http_logical<B, ESvc, R>(self, resolve: R) -> Outbound<svc::ArcNewHttp<Logical, B>>
     where
         B: http::HttpBody<Error = Error> + std::fmt::Debug + Default + Unpin + Send + 'static,
         B::Data: Send + 'static,
@@ -40,14 +40,12 @@ impl<E> Outbound<E> {
             let endpoint =
                 endpoint.instrument(|e: &Endpoint| debug_span!("endpoint", server.addr = %e.addr));
 
-            let identity_disabled = rt.identity.is_none();
             let resolve = svc::stack(resolve.into_service())
                 .check_service::<ConcreteAddr>()
                 .push_request_filter(|c: Concrete| Ok::<_, Infallible>(c.resolve))
                 .push(svc::layer::mk(move |inner| {
                     map_endpoint::Resolve::new(
                         endpoint::FromMetadata {
-                            identity_disabled,
                             inbound_ips: config.inbound_ips.clone(),
                         },
                         inner,
@@ -60,17 +58,12 @@ impl<E> Outbound<E> {
                 .clone()
                 .check_new_service::<Endpoint, http::Request<http::BoxBody>>()
                 .push_on_service(
-                    svc::layers()
-                        .push(http::BoxRequest::layer())
-                        .push(
-                            rt.metrics
-                                .proxy
-                                .stack
-                                .layer(stack_labels("http", "balance.endpoint")),
-                        )
-                        // Ensure individual endpoints are driven to readiness so that
-                        // the balancer need not drive them all directly.
-                        .push(svc::layer::mk(svc::SpawnReady::new)),
+                    svc::layers().push(http::BoxRequest::layer()).push(
+                        rt.metrics
+                            .proxy
+                            .stack
+                            .layer(stack_labels("http", "balance.endpoint")),
+                    ),
                 )
                 .check_new_service::<Endpoint, http::Request<_>>()
                 // Resolve the service to its endpoints and balance requests over them.
@@ -78,6 +71,12 @@ impl<E> Outbound<E> {
                 // If the balancer has been empty/unavailable, eagerly fail requests.
                 // When the balancer is in failfast, spawn the service in a background
                 // task so it becomes ready without new requests.
+                //
+                // We *don't* ensure that the endpoint is driven to readiness here, because this
+                // might cause us to continually attempt to reestablish connections without
+                // consulting discovery to see whether the endpoint has been removed. Instead, the
+                // endpoint layer spawns each _connection_ attempt on a background task, but the
+                // decision to attempt the connection must be driven by the balancer.
                 .push(resolve::layer(resolve, watchdog))
                 .push_on_service(
                     svc::layers()
@@ -96,7 +95,7 @@ impl<E> Outbound<E> {
                         .push(http::BoxResponse::layer()),
                 )
                 .check_make_service::<Concrete, http::Request<_>>()
-                .push(svc::MapErrLayer::new(Into::into))
+                .push(svc::MapErr::layer(Into::into))
                 // Drives the initial resolution via the service's readiness.
                 .into_new_service()
                 // The concrete address is only set when the profile could be
@@ -104,6 +103,7 @@ impl<E> Outbound<E> {
                 // concrete address.
                 .instrument(|c: &Concrete| debug_span!("concrete", addr = %c.resolve))
                 .push_map_target(Concrete::from)
+                .push(svc::ArcNewService::layer())
                 // Distribute requests over a distribution of balancers via a
                 // traffic split.
                 //
@@ -146,7 +146,7 @@ impl<E> Outbound<E> {
                         // Sets an optional retry policy.
                         .push(retry::layer(rt.metrics.proxy.http_route_retry.clone()))
                         // Sets an optional request timeout.
-                        .push(http::MakeTimeoutLayer::default())
+                        .push(http::NewTimeout::layer())
                         // Records per-route metrics.
                         .push(
                             rt.metrics
@@ -161,6 +161,7 @@ impl<E> Outbound<E> {
                         .push_on_service(http::BoxResponse::layer())
                         .into_inner(),
                 ))
+                .check_new_service::<Logical, http::Request<_>>()
                 .push_on_service(http::BoxRequest::layer())
                 // Strips headers that may be set by this proxy and add an outbound
                 // canonical-dst-header. The response body is boxed unify the profile
@@ -169,7 +170,7 @@ impl<E> Outbound<E> {
                 .push_on_service(http::BoxResponse::layer())
                 .instrument(|l: &Logical| debug_span!("logical", dst = %l.logical_addr))
                 .push_on_service(svc::BoxService::layer())
-                .push(svc::BoxNewService::layer())
+                .push(svc::ArcNewService::layer())
         })
     }
 }

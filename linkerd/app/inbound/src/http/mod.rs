@@ -26,7 +26,7 @@ pub mod fuzz {
     use linkerd_app_core::{
         identity, io,
         proxy::http,
-        svc::{self, NewService, Param},
+        svc::{self, NewService},
         tls,
         transport::{ClientAddr, OrigDstAddr, Remote, ServerAddr},
         NameAddr, ProxyRuntime,
@@ -120,12 +120,12 @@ pub mod fuzz {
         rt: ProxyRuntime,
         profiles: resolver::Profiles,
         connect: Connect<Remote<ServerAddr>>,
-    ) -> svc::BoxNewTcp<Target, I>
+    ) -> svc::ArcNewTcp<Target, I>
     where
         I: io::AsyncRead + io::AsyncWrite + io::PeerAddr + Send + Unpin + 'static,
     {
         let connect = svc::stack(connect)
-            .push_map_target(|t: Http| Remote(ServerAddr(([127, 0, 0, 1], t.param()).into())))
+            .push_map_target(|t: Http| svc::Param::<Remote<ServerAddr>>::param(&t))
             .into_inner();
         Inbound::new(cfg, rt)
             .with_stack(connect)
@@ -216,9 +216,9 @@ pub mod fuzz {
                     authorizations: vec![policy::Authorization {
                         authentication: policy::Authentication::Unauthenticated,
                         networks: vec![std::net::IpAddr::from([192, 0, 2, 3]).into()],
-                        name: "testsaz".to_string(),
+                        name: "testsaz".into(),
                     }],
-                    name: "testsrv".to_string(),
+                    name: "testsrv".into(),
                 },
             );
             policy
@@ -227,7 +227,7 @@ pub mod fuzz {
 
     impl svc::Param<policy::ServerLabel> for Target {
         fn param(&self) -> policy::ServerLabel {
-            policy::ServerLabel("testsrv".to_string())
+            policy::ServerLabel("testsrv".into())
         }
     }
 

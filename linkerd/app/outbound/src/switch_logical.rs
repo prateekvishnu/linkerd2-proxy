@@ -13,7 +13,7 @@ impl<S> Outbound<S> {
     pub fn push_switch_logical<T, I, N, NSvc, SSvc>(
         self,
         logical: N,
-    ) -> Outbound<svc::BoxNewTcp<(Option<profiles::Receiver>, T), I>>
+    ) -> Outbound<svc::ArcNewTcp<(Option<profiles::Receiver>, T), I>>
     where
         Self: Clone + 'static,
         T: svc::Param<OrigDstAddr> + Clone + Send + Sync + 'static,
@@ -61,7 +61,7 @@ impl<S> Outbound<S> {
                     logical,
                 )
                 .push_on_service(svc::BoxService::layer())
-                .push(svc::BoxNewService::layer())
+                .push(svc::ArcNewService::layer())
         })
     }
 }

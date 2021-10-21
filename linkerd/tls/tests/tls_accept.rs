@@ -8,17 +8,16 @@
 use futures::prelude::*;
 use linkerd_conditional::Conditional;
 use linkerd_error::Infallible;
-use linkerd_identity as id;
 use linkerd_io::{self as io, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use linkerd_proxy_transport::{
     addrs::*,
     listen::{Addrs, Bind, BindTcp},
     ConnectTcp, Keepalive, ListenAddr,
 };
-use linkerd_stack::{ExtractParam, InsertParam, NewService, Param};
+use linkerd_stack::{ExtractParam, InsertParam, NewService, Param, Service};
 use linkerd_tls as tls;
-use std::{future::Future, time::Duration};
-use std::{net::SocketAddr, sync::mpsc};
+use linkerd_tls_rustls as rustls;
+use std::{future::Future, net::SocketAddr, sync::mpsc, task, time::Duration};
 use tokio::net::TcpStream;
 use tower::{
     layer::Layer,
@@ -26,14 +25,20 @@ use tower::{
 };
 use tracing::instrument::Instrument;
 
-type ServerConn<T, I> = ((tls::ConditionalServerTls, T), tls::server::Io<I>);
+type ServerConn<T, I> = (
+    (tls::ConditionalServerTls, T),
+    io::EitherIo<rustls::ServerIo<tls::server::DetectIo<I>>, tls::server::DetectIo<I>>,
+);
 
 #[tokio::test(flavor = "current_thread")]
 async fn plaintext() {
+    let server_tls = rustls::test_util::FOO_NS1.validate().unwrap();
+    let client_tls = rustls::test_util::BAR_NS1.validate().unwrap();
     let (client_result, server_result) = run_test(
+        client_tls,
         Conditional::None(tls::NoClientTls::NotProvidedByServiceDiscovery),
         |conn| write_then_read(conn, PING),
-        None,
+        server_tls,
         |(_, conn)| read_then_write(conn, PING.len(), PONG),
     )
     .await;
@@ -46,20 +51,21 @@ async fn plaintext() {
     assert_eq!(&client_result.result.expect("pong")[..], PONG);
     assert_eq!(
         server_result.tls,
-        Some(Conditional::None(tls::NoServerTls::Disabled))
+        Some(Conditional::None(tls::NoServerTls::NoClientHello))
     );
     assert_eq!(&server_result.result.expect("ping")[..], PING);
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn proxy_to_proxy_tls_works() {
-    let server_tls = id::test_util::FOO_NS1.validate().unwrap();
-    let client_tls = id::test_util::BAR_NS1.validate().unwrap();
+    let server_tls = rustls::test_util::FOO_NS1.validate().unwrap();
+    let client_tls = rustls::test_util::BAR_NS1.validate().unwrap();
     let server_id = tls::ServerId(server_tls.name().clone());
     let (client_result, server_result) = run_test(
-        Conditional::Some((client_tls.clone(), server_id.clone())),
+        client_tls.clone(),
+        Conditional::Some(server_id.clone()),
         |conn| write_then_read(conn, PING),
-        Some(server_tls),
+        server_tls,
         |(_, conn)| read_then_write(conn, PING.len(), PONG),
     )
     .await;
@@ -83,19 +89,20 @@ async fn proxy_to_proxy_tls_works() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn proxy_to_proxy_tls_pass_through_when_identity_does_not_match() {
-    let server_tls = id::test_util::FOO_NS1.validate().unwrap();
+    let server_tls = rustls::test_util::FOO_NS1.validate().unwrap();
 
     // Misuse the client's identity instead of the server's identity. Any
     // identity other than `server_tls.server_identity` would work.
-    let client_tls = id::test_util::BAR_NS1
+    let client_tls = rustls::test_util::BAR_NS1
         .validate()
         .expect("valid client cert");
-    let sni = id::test_util::BAR_NS1.crt().name().clone();
+    let sni = rustls::test_util::BAR_NS1.crt().name().clone();
 
     let (client_result, server_result) = run_test(
-        Conditional::Some((client_tls, tls::ServerId(sni.clone()))),
+        client_tls,
+        Conditional::Some(tls::ServerId(sni.clone())),
         |conn| write_then_read(conn, PING),
-        Some(server_tls),
+        server_tls,
         |(_, conn)| read_then_write(conn, START_OF_TLS.len(), PONG),
     )
     .await;
@@ -122,16 +129,19 @@ struct Transported<I, R> {
 
 #[derive(Clone)]
 struct ServerParams {
-    identity: Option<id::CrtKey>,
+    identity: rustls::CrtKey,
 }
+
+type ClientIo = io::EitherIo<io::ScopedIo<TcpStream>, rustls::ClientIo<io::ScopedIo<TcpStream>>>;
 
 /// Runs a test for a single TCP connection. `client` processes the connection
 /// on the client side and `server` processes the connection on the server
 /// side.
 async fn run_test<C, CF, CR, S, SF, SR>(
-    client_tls: Conditional<(id::CrtKey, tls::ServerId), tls::NoClientTls>,
+    client_tls: rustls::CrtKey,
+    client_server_id: Conditional<tls::ServerId, tls::NoClientTls>,
     client: C,
-    server_tls: Option<id::CrtKey>,
+    server_id: rustls::CrtKey,
     server: S,
 ) -> (
     Transported<tls::ConditionalClientTls, CR>,
@@ -139,7 +149,7 @@ async fn run_test<C, CF, CR, S, SF, SR>(
 )
 where
     // Client
-    C: FnOnce(tls::client::Io<io::ScopedIo<TcpStream>>) -> CF + Clone + Send + 'static,
+    C: FnOnce(ClientIo) -> CF + Clone + Send + 'static,
     CF: Future<Output = Result<CR, io::Error>> + Send + 'static,
     CR: Send + 'static,
     // Server
@@ -147,11 +157,6 @@ where
     SF: Future<Output = Result<SR, io::Error>> + Send + 'static,
     SR: Send + 'static,
 {
-    let (client_tls, client_server_id) = match client_tls {
-        Conditional::Some((crtkey, name)) => (Some(Tls(crtkey)), Conditional::Some(name)),
-        Conditional::None(reason) => (None, Conditional::None(reason)),
-    };
-
     let _trace = linkerd_tracing::test::trace_init();
 
     // A future that will receive a single connection.
@@ -159,9 +164,9 @@ where
         // Saves the result of every connection.
         let (sender, receiver) = mpsc::channel::<Transported<tls::ConditionalServerTls, SR>>();
 
-        let detect = tls::NewDetectTls::new(
+        let detect = tls::NewDetectTls::<Tls, _, _>::new(
             ServerParams {
-                identity: server_tls,
+                identity: server_id,
             },
             move |meta: (tls::ConditionalServerTls, Addrs)| {
                 let server = server.clone();
@@ -214,7 +219,7 @@ where
 
         let tls = Some(client_server_id.clone().map(Into::into));
         let client = async move {
-            let conn = tls::Client::layer(client_tls)
+            let conn = tls::Client::layer(Tls(client_tls))
                 .layer(ConnectTcp::new(Keepalive(None)))
                 .oneshot(Target(server_addr.into(), client_server_id.map(Into::into)))
                 .await;
@@ -309,7 +314,7 @@ struct Server;
 struct Target(SocketAddr, tls::ConditionalClientTls);
 
 #[derive(Clone)]
-struct Tls(id::CrtKey);
+struct Tls(rustls::CrtKey);
 
 // === impl Target ===
 
@@ -327,15 +332,30 @@ impl Param<tls::ConditionalClientTls> for Target {
 
 // === impl Tls ===
 
-impl Param<tls::client::Config> for Tls {
-    fn param(&self) -> tls::client::Config {
-        self.0.client_config()
+impl NewService<tls::ClientTls> for Tls {
+    type Service = rustls::Connect;
+
+    fn new_service(&self, target: tls::ClientTls) -> Self::Service {
+        rustls::Connect::new(target, self.0.client_config())
     }
 }
 
-impl Param<tls::server::Config> for Tls {
-    fn param(&self) -> tls::server::Config {
-        self.0.server_config()
+impl<I> Service<I> for Tls
+where
+    I: io::AsyncRead + io::AsyncWrite + Send + Unpin,
+{
+    type Response = (tls::ServerTls, rustls::ServerIo<I>);
+    type Error = io::Error;
+    type Future = rustls::TerminateFuture<I>;
+
+    #[inline]
+    fn poll_ready(&mut self, _: &mut task::Context<'_>) -> task::Poll<Result<(), io::Error>> {
+        task::Poll::Ready(Ok(()))
+    }
+
+    #[inline]
+    fn call(&mut self, io: I) -> Self::Future {
+        rustls::terminate(self.0.server_config(), io)
     }
 }
 
@@ -370,9 +390,9 @@ impl<T> ExtractParam<tls::server::Timeout, T> for ServerParams {
     }
 }
 
-impl<T> ExtractParam<Option<Tls>, T> for ServerParams {
-    fn extract_param(&self, _: &T) -> Option<Tls> {
-        self.identity.clone().map(Tls)
+impl<T> ExtractParam<Tls, T> for ServerParams {
+    fn extract_param(&self, _: &T) -> Tls {
+        Tls(self.identity.clone())
     }
 }
 

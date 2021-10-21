@@ -10,7 +10,7 @@ use tracing::debug_span;
 
 #[derive(Copy, Clone, Debug)]
 struct TcpEndpoint {
-    port: u16,
+    addr: Remote<ServerAddr>,
 }
 
 // === impl Inbound ===
@@ -38,7 +38,7 @@ impl Inbound<()> {
         A: svc::Param<Remote<ClientAddr>> + svc::Param<OrigDstAddr> + Clone + Send + Sync + 'static,
         I: io::AsyncRead + io::AsyncWrite + io::Peek + io::PeerAddr,
         I: Debug + Unpin + Send + Sync + 'static,
-        G: svc::NewService<direct::GatewayConnection, Service = GSvc>,
+        G: svc::NewService<direct::GatewayTransportHeader, Service = GSvc>,
         G: Clone + Send + Sync + Unpin + 'static,
         GSvc: svc::Service<direct::GatewayIo<io::ScopedIo<I>>, Response = ()> + Send + 'static,
         GSvc::Error: Into<Error>,
@@ -90,14 +90,14 @@ impl Inbound<()> {
 // === impl TcpEndpoint ===
 
 impl TcpEndpoint {
-    pub fn from_param<T: svc::Param<u16>>(t: T) -> Self {
-        Self { port: t.param() }
+    pub fn from_param<T: svc::Param<Remote<ServerAddr>>>(t: T) -> Self {
+        Self { addr: t.param() }
     }
 }
 
-impl svc::Param<u16> for TcpEndpoint {
-    fn param(&self) -> u16 {
-        self.port
+impl svc::Param<Remote<ServerAddr>> for TcpEndpoint {
+    fn param(&self) -> Remote<ServerAddr> {
+        self.addr
     }
 }
 

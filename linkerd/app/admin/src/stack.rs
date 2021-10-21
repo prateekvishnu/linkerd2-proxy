@@ -2,8 +2,9 @@ use linkerd_app_core::{
     classify,
     config::ServerConfig,
     detect, drain, errors,
+    identity::LocalCrtKey,
     metrics::{self, FmtMetrics},
-    proxy::{http, identity::LocalCrtKey},
+    proxy::http,
     serve,
     svc::{self, ExtractParam, InsertParam, Param},
     tls, trace,
@@ -58,10 +59,13 @@ struct Permitted {
 
 #[derive(Clone)]
 struct TlsParams {
-    identity: Option<LocalCrtKey>,
+    identity: LocalCrtKey,
 }
 
 const DETECT_TIMEOUT: Duration = Duration::from_secs(1);
+
+#[derive(Copy, Clone, Debug)]
+struct Rescue;
 
 // === impl Config ===
 
@@ -71,7 +75,7 @@ impl Config {
         self,
         bind: B,
         policy: impl inbound::policy::CheckPolicy,
-        identity: Option<LocalCrtKey>,
+        identity: LocalCrtKey,
         report: R,
         metrics: inbound::Metrics,
         trace: trace::Handle,
@@ -94,17 +98,8 @@ impl Config {
             .push(metrics.proxy.http_endpoint.to_layer::<classify::Response, _, Permitted>())
             .push_map_target(|(permit, http)| Permitted { permit, http })
             .push(inbound::policy::NewAuthorizeHttp::layer(metrics.http_authz.clone()))
-            .push_on_service(
-                svc::layers()
-                    .push(errors::NewRespond::layer(|error: Error| -> Result<_> {
-                        if error.is::<inbound::policy::DeniedUnauthorized> () {
-                            return Ok(errors::SyntheticHttpResponse::permission_denied(error));
-                        }
-                        tracing::warn!(%error, "Unexpected error");
-                        Ok(errors::SyntheticHttpResponse::unexpected_error())
-                    }))
-                    .push(http::BoxResponse::layer()),
-            )
+            .push(Rescue::layer())
+            .push_on_service(http::BoxResponse::layer())
             .push(http::NewServeHttp::layer(Default::default(), drain.clone()))
             .push_request_filter(
                 |(http, tcp): (
@@ -147,7 +142,8 @@ impl Config {
                     }
                 },
             )
-            .push(detect::NewDetectService::layer(detect::Config::<http::DetectHttp>::from_timeout(DETECT_TIMEOUT)))
+            .push(svc::ArcNewService::layer())
+            .push(detect::NewDetectService::layer(svc::stack::CloneParam::from(detect::Config::<http::DetectHttp>::from_timeout(DETECT_TIMEOUT))))
             .push(transport::metrics::NewServer::layer(metrics.proxy.transport))
             .push_map_target(move |(tls, addrs): (tls::ConditionalServerTls, B::Addrs)| {
                 Tcp {
@@ -157,7 +153,8 @@ impl Config {
                     policy: policy.clone(),
                 }
             })
-            .push(tls::NewDetectTls::layer(TlsParams {
+            .push(svc::ArcNewService::layer())
+            .push(tls::NewDetectTls::<LocalCrtKey, _, _>::layer(TlsParams {
                 identity,
             }))
             .into_inner();
@@ -244,9 +241,9 @@ impl<T> ExtractParam<tls::server::Timeout, T> for TlsParams {
     }
 }
 
-impl<T> ExtractParam<Option<LocalCrtKey>, T> for TlsParams {
+impl<T> ExtractParam<LocalCrtKey, T> for TlsParams {
     #[inline]
-    fn extract_param(&self, _: &T) -> Option<LocalCrtKey> {
+    fn extract_param(&self, _: &T) -> LocalCrtKey {
         self.identity.clone()
     }
 }
@@ -257,5 +254,50 @@ impl<T> InsertParam<tls::ConditionalServerTls, T> for TlsParams {
     #[inline]
     fn insert_param(&self, tls: tls::ConditionalServerTls, target: T) -> Self::Target {
         (tls, target)
+    }
+}
+
+// === impl Rescue ===
+
+impl Rescue {
+    /// Synthesizes responses for HTTP requests that encounter errors.
+    fn layer<N>(
+    ) -> impl svc::layer::Layer<N, Service = errors::NewRespondService<Self, Self, N>> + Clone {
+        errors::respond::layer(Self)
+    }
+}
+
+impl<T> ExtractParam<Self, T> for Rescue {
+    #[inline]
+    fn extract_param(&self, _: &T) -> Self {
+        Self
+    }
+}
+
+impl<T: Param<tls::ConditionalServerTls>> ExtractParam<errors::respond::EmitHeaders, T> for Rescue {
+    #[inline]
+    fn extract_param(&self, t: &T) -> errors::respond::EmitHeaders {
+        // Only emit informational headers to meshed peers.
+        let emit = t
+            .param()
+            .value()
+            .map(|tls| match tls {
+                tls::ServerTls::Established { client_id, .. } => client_id.is_some(),
+                _ => false,
+            })
+            .unwrap_or(false);
+        errors::respond::EmitHeaders(emit)
+    }
+}
+
+impl errors::HttpRescue<Error> for Rescue {
+    fn rescue(&self, error: Error) -> Result<errors::SyntheticHttpResponse> {
+        let cause = errors::root_cause(&*error);
+        if cause.is::<inbound::policy::DeniedUnauthorized>() {
+            return Ok(errors::SyntheticHttpResponse::permission_denied(error));
+        }
+
+        tracing::warn!(%error, "Unexpected error");
+        Ok(errors::SyntheticHttpResponse::unexpected_error())
     }
 }

@@ -1,10 +1,15 @@
 pub mod detect;
 mod endpoint;
 pub mod logical;
-mod peer_proxy_errors;
+mod proxy_connection_close;
 mod require_id_header;
 mod server;
+mod strip_proxy_error;
 
+use self::{
+    proxy_connection_close::ProxyConnectionClose, require_id_header::NewRequireIdentity,
+    strip_proxy_error::NewStripProxyError,
+};
 pub(crate) use self::{require_id_header::IdentityRequired, server::ServerRescue};
 use crate::tcp;
 pub use linkerd_app_core::proxy::http::*;

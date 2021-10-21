@@ -1,14 +1,14 @@
 use crate::{policy, Inbound};
 use linkerd_app_core::{
-    io,
-    proxy::identity::LocalCrtKey,
+    identity::LocalCrtKey,
+    io, rustls,
     svc::{self, ExtractParam, InsertParam, Param},
     tls,
-    transport::{self, metrics::SensorIo, ClientAddr, OrigDstAddr, Remote},
+    transport::{self, metrics::SensorIo, ClientAddr, OrigDstAddr, Remote, ServerAddr},
     transport_header::{self, NewTransportHeaderServer, SessionProtocol, TransportHeader},
     Conditional, Error, NameAddr, Result,
 };
-use std::{convert::TryFrom, fmt::Debug};
+use std::{convert::TryFrom, fmt::Debug, task};
 use thiserror::Error;
 use tracing::{debug_span, info_span};
 
@@ -30,29 +30,15 @@ struct RefusedNoTarget;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Local {
-    port: u16,
+    addr: Remote<ServerAddr>,
     client_id: tls::ClientId,
     permit: policy::Permit,
-}
-
-/// Gateway connections come in two variants: those with a transport header, and
-/// legacy connections, without a transport header.
-#[derive(Debug, Clone)]
-pub enum GatewayConnection {
-    TransportHeader(GatewayTransportHeader),
-    Legacy(Legacy),
 }
 
 #[derive(Debug, Clone)]
 pub struct GatewayTransportHeader {
     pub target: NameAddr,
     pub protocol: Option<SessionProtocol>,
-    pub client: ClientInfo,
-    pub policy: policy::AllowPolicy,
-}
-
-#[derive(Debug, Clone)]
-pub struct Legacy {
     pub client: ClientInfo,
     pub policy: policy::AllowPolicy,
 }
@@ -66,13 +52,14 @@ pub struct ClientInfo {
     pub local_addr: OrigDstAddr,
 }
 
-type FwdIo<I> = SensorIo<io::PrefixedIo<tls::server::Io<I>>>;
-pub type GatewayIo<I> = io::EitherIo<FwdIo<I>, SensorIo<tls::server::Io<I>>>;
+type TlsIo<I> = tls::server::Io<rustls::ServerIo<tls::server::DetectIo<I>>, I>;
+type FwdIo<I> = SensorIo<io::PrefixedIo<TlsIo<I>>>;
+pub type GatewayIo<I> = io::EitherIo<FwdIo<I>, SensorIo<TlsIo<I>>>;
 
 #[derive(Clone)]
 struct TlsParams {
     timeout: tls::server::Timeout,
-    identity: Option<WithTransportHeaderAlpn>,
+    identity: WithTransportHeaderAlpn,
 }
 
 impl<N> Inbound<N> {
@@ -88,7 +75,7 @@ impl<N> Inbound<N> {
         self,
         policies: impl policy::CheckPolicy + Clone + Send + Sync + 'static,
         gateway: G,
-    ) -> Inbound<svc::BoxNewTcp<T, I>>
+    ) -> Inbound<svc::ArcNewTcp<T, I>>
     where
         T: Param<Remote<ClientAddr>> + Param<OrigDstAddr>,
         T: Clone + Send + 'static,
@@ -98,7 +85,7 @@ impl<N> Inbound<N> {
         NSvc: svc::Service<FwdIo<I>, Response = ()> + Clone + Send + Sync + Unpin + 'static,
         NSvc::Error: Into<Error>,
         NSvc::Future: Send + Unpin,
-        G: svc::NewService<GatewayConnection, Service = GSvc>
+        G: svc::NewService<GatewayTransportHeader, Service = GSvc>
             + Clone
             + Send
             + Sync
@@ -116,7 +103,6 @@ impl<N> Inbound<N> {
                     rt.metrics.proxy.transport.clone(),
                 ))
                 .instrument(|_: &_| debug_span!("opaque"))
-                .check_new_service::<Local, _>()
                 // When the transport header is present, it may be used for either local TCP
                 // forwarding, or we may be processing an HTTP gateway connection. HTTP gateway
                 // connections that have a transport header must provide a target name as a part of
@@ -135,17 +121,21 @@ impl<N> Inbound<N> {
                                     // not identify an alternate target name), we check the new
                                     // target's policy to determine whether the client can access
                                     // it.
-                                    let allow = policies.check_policy(OrigDstAddr(
-                                        (client.local_addr.ip(), port).into(),
-                                    ))?;
+                                    let addr = (client.local_addr.ip(), port).into();
+                                    let allow = policies.check_policy(OrigDstAddr(addr))?;
                                     let tls = tls::ConditionalServerTls::Some(
                                         tls::ServerTls::Established {
                                             client_id: Some(client.client_id.clone()),
                                             negotiated_protocol: client.alpn,
                                         },
                                     );
-                                    let permit = allow.check_authorized(client.client_addr, &tls)?;
-                                    Ok(svc::Either::A(Local { port, permit, client_id: client.client_id, }))
+                                    let permit =
+                                        allow.check_authorized(client.client_addr, &tls)?;
+                                    Ok(svc::Either::A(Local {
+                                        addr: Remote(ServerAddr(addr)),
+                                        permit,
+                                        client_id: client.client_id,
+                                    }))
                                 }
                                 TransportHeader {
                                     port,
@@ -176,57 +166,35 @@ impl<N> Inbound<N> {
                     // header indicates the connection's HTTP version.
                     svc::stack(gateway.clone())
                         .push_on_service(svc::MapTargetLayer::new(io::EitherIo::Left))
-                        .push_map_target(GatewayConnection::TransportHeader)
                         .push(transport::metrics::NewServer::layer(
                             rt.metrics.proxy.transport.clone(),
                         ))
                         .instrument(
                             |g: &GatewayTransportHeader| info_span!("gateway", dst = %g.target),
                         )
-                        .check_new_service::<GatewayTransportHeader, io::PrefixedIo<tls::server::Io<I>>>()
                         .into_inner(),
                 )
                 // Use ALPN to determine whether a transport header should be read.
-                //
-                // When the transport header is not present, perform HTTP detection to
-                // support legacy gateway clients.
                 .push(NewTransportHeaderServer::layer(detect_timeout))
-                .push_switch(
-                    move |client: ClientInfo| -> Result<_> {
-                        if client.header_negotiated() {
-                            Ok(svc::Either::A(client))
-                        } else {
-                            // When we receive legacy connections with no transport headers, we must
-                            // be receiving a gateway connection from an older client.  We check the
-                            // gateway address's policy to determine whether the client is
-                            // authorized to use this gateway.
-                            let policy = policies.check_policy(client.local_addr)?;
-                            Ok(svc::Either::B(Legacy { client, policy }))
-                        }
-                    },
-                    // TODO(ver): Remove this after we have another stable release out with
-                    // transport header support.
-                    svc::stack(gateway)
-                        .push_map_target(GatewayConnection::Legacy)
-                        .push_on_service(svc::MapTargetLayer::new(io::EitherIo::Right))
-                        .push(transport::metrics::NewServer::layer(
-                            rt.metrics.proxy.transport.clone(),
-                        ))
-                        .instrument(|_: &Legacy| info_span!("gateway", legacy = true))
-                        .check_new_service::<Legacy, tls::server::Io<I>>()
-                        .into_inner(),
-                )
-                .check_new_service::<ClientInfo, tls::server::Io<I>>()
+                .push_request_filter(|client: ClientInfo| -> Result<_> {
+                    if client.header_negotiated() {
+                        Ok(client)
+                    } else {
+                        Err(RefusedNoTarget.into())
+                    }
+                })
                 // Build a ClientInfo target for each accepted connection. Refuse the
                 // connection if it doesn't include an mTLS identity.
                 .push_request_filter(ClientInfo::try_from)
-                .push(tls::NewDetectTls::layer(TlsParams {
-                    timeout: tls::server::Timeout(detect_timeout),
-                    identity: rt.identity.clone().map(WithTransportHeaderAlpn),
-                }))
-                .check_new_service::<T, I>()
+                .push(svc::ArcNewService::layer())
+                .push(tls::NewDetectTls::<WithTransportHeaderAlpn, _, _>::layer(
+                    TlsParams {
+                        timeout: tls::server::Timeout(detect_timeout),
+                        identity: WithTransportHeaderAlpn(rt.identity.clone()),
+                    },
+                ))
                 .push_on_service(svc::BoxService::layer())
-                .push(svc::BoxNewService::layer())
+                .push(svc::ArcNewService::layer())
         })
     }
 }
@@ -267,9 +235,9 @@ impl ClientInfo {
 
 // === impl Local ===
 
-impl Param<u16> for Local {
-    fn param(&self) -> u16 {
-        self.port
+impl Param<Remote<ServerAddr>> for Local {
+    fn param(&self) -> Remote<ServerAddr> {
+        self.addr
     }
 }
 
@@ -280,7 +248,7 @@ impl Param<transport::labels::Key> for Local {
                 client_id: Some(self.client_id.clone()),
                 negotiated_protocol: None,
             }),
-            ([127, 0, 0, 1], self.port).into(),
+            self.addr.into(),
             self.permit.labels.server.clone(),
         )
     }
@@ -325,25 +293,22 @@ impl Param<tls::ConditionalServerTls> for GatewayTransportHeader {
     }
 }
 
-// === impl Legacy ===
-
-impl Param<transport::labels::Key> for Legacy {
-    fn param(&self) -> transport::labels::Key {
-        transport::labels::Key::inbound_server(
-            tls::ConditionalServerTls::Some(tls::ServerTls::Established {
-                client_id: Some(self.client.client_id.clone()),
-                negotiated_protocol: self.client.alpn.clone(),
-            }),
-            self.client.local_addr.into(),
-            self.policy.server_label(),
-        )
-    }
-}
-
 // === impl WithTransportHeaderAlpn ===
 
-impl svc::Param<tls::server::Config> for WithTransportHeaderAlpn {
-    fn param(&self) -> tls::server::Config {
+impl<I> svc::Service<I> for WithTransportHeaderAlpn
+where
+    I: io::AsyncRead + io::AsyncWrite + Send + Unpin,
+{
+    type Response = (tls::ServerTls, rustls::ServerIo<I>);
+    type Error = io::Error;
+    type Future = rustls::TerminateFuture<I>;
+
+    #[inline]
+    fn poll_ready(&mut self, _: &mut task::Context<'_>) -> task::Poll<Result<(), io::Error>> {
+        task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, io: I) -> Self::Future {
         // Copy the underlying TLS config and set an ALPN value.
         //
         // TODO: Avoid cloning the server config for every connection. It would
@@ -353,7 +318,7 @@ impl svc::Param<tls::server::Config> for WithTransportHeaderAlpn {
         config
             .alpn_protocols
             .push(transport_header::PROTOCOL.into());
-        config.into()
+        rustls::terminate(config.into(), io)
     }
 }
 
@@ -383,9 +348,9 @@ impl<T> ExtractParam<tls::server::Timeout, T> for TlsParams {
     }
 }
 
-impl<T> ExtractParam<Option<WithTransportHeaderAlpn>, T> for TlsParams {
+impl<T> ExtractParam<WithTransportHeaderAlpn, T> for TlsParams {
     #[inline]
-    fn extract_param(&self, _: &T) -> Option<WithTransportHeaderAlpn> {
+    fn extract_param(&self, _: &T) -> WithTransportHeaderAlpn {
         self.identity.clone()
     }
 }

@@ -3,15 +3,17 @@
 #![deny(warnings, rust_2018_idioms)]
 #![forbid(unsafe_code)]
 
+mod arc_new_service;
 mod box_future;
-mod box_new_service;
 mod box_service;
 mod either;
 mod fail;
 mod fail_on_error;
+mod failfast;
 mod filter;
 pub mod layer;
 mod make_thunk;
+mod map_err;
 mod map_target;
 pub mod monitor;
 pub mod new_service;
@@ -20,17 +22,20 @@ mod proxy;
 mod result;
 mod router;
 mod switch_ready;
+mod timeout;
 mod unwrap_or;
 
 pub use self::{
+    arc_new_service::ArcNewService,
     box_future::BoxFuture,
-    box_new_service::BoxNewService,
     box_service::{BoxService, BoxServiceLayer},
     either::{Either, NewEither},
     fail::Fail,
     fail_on_error::FailOnError,
+    failfast::{FailFast, FailFastError},
     filter::{Filter, FilterLayer, Predicate},
     make_thunk::MakeThunk,
+    map_err::MapErr,
     map_target::{MapTarget, MapTargetLayer, MapTargetService},
     monitor::{Monitor, MonitorError, MonitorNewService, MonitorService, NewMonitor},
     new_service::NewService,
@@ -39,10 +44,11 @@ pub use self::{
     result::ResultService,
     router::{NewRouter, RecognizeRoute},
     switch_ready::{NewSwitchReady, SwitchReady},
+    timeout::{Timeout, TimeoutError},
     unwrap_or::UnwrapOr,
 };
 pub use tower::{
-    util::{future_service, FutureService, MapErr, MapErrLayer, Oneshot, ServiceExt},
+    util::{future_service, FutureService, Oneshot, ServiceExt},
     Service,
 };
 
@@ -74,6 +80,10 @@ pub trait InsertParam<P, T> {
     fn insert_param(&self, param: P, target: T) -> Self::Target;
 }
 
+/// Implements `ExtractParam` by cloning the inner `P`-typed parameter.
+#[derive(Copy, Clone, Debug)]
+pub struct CloneParam<P>(P);
+
 /// === Param ===
 
 /// The identity `Param`.
@@ -86,10 +96,33 @@ impl<T: ToOwned> Param<T::Owned> for T {
 
 /// === ExtractParam ===
 
-impl<P: ToOwned, T> ExtractParam<P::Owned, T> for P {
+impl<F, P, T> ExtractParam<P, T> for F
+where
+    F: Fn(&T) -> P,
+{
+    fn extract_param(&self, t: &T) -> P {
+        (self)(t)
+    }
+}
+
+impl<P, T: Param<P>> ExtractParam<P, T> for () {
+    fn extract_param(&self, t: &T) -> P {
+        t.param()
+    }
+}
+
+// === impl CloneParam ===
+
+impl<P> From<P> for CloneParam<P> {
+    fn from(p: P) -> Self {
+        Self(p)
+    }
+}
+
+impl<P: ToOwned, T> ExtractParam<P::Owned, T> for CloneParam<P> {
     #[inline]
     fn extract_param(&self, _: &T) -> P::Owned {
-        self.to_owned()
+        self.0.to_owned()
     }
 }
 
