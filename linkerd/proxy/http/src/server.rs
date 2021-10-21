@@ -47,6 +47,7 @@ impl<N> NewServeHttp<N> {
     fn new(h2: H2Settings, inner: N, drain: drain::Watch) -> Self {
         let mut server = hyper::server::conn::Http::new().with_executor(trace::Executor::new());
         server
+            .max_buf_size(64 * 1024)
             .http2_initial_stream_window_size(h2.initial_stream_window_size)
             .http2_initial_connection_window_size(h2.initial_connection_window_size);
 
