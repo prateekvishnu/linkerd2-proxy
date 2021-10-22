@@ -3,7 +3,7 @@ name = "linkerd-proxy-http"
 version = "0.1.0"
 authors = ["Linkerd Developers <cncf-linkerd-dev@lists.cncf.io>"]
 license = "Apache-2.0"
-edition = "2018"
+edition = "2021"
 publish = false
 description = """
 HTTP-specific implementations that rely on other proxy infrastructure
@@ -20,7 +20,7 @@ h2 = "0.3"
 http = "0.2"
 http-body = "0.4"
 httparse = "1.5"
-hyper = { version = "0.14.13", features = ["client", "http1", "http2", "server", "stream", "runtime"] }
+hyper = { version = "0.14.14", features = ["client", "http1", "http2", "server", "stream", "runtime"] }
 hyper-balance = { path = "../../../hyper-balance" }
 linkerd-detect = { path = "../../detect" }
 linkerd-duplex = { path = "../../duplex" }

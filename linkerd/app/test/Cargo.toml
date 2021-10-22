@@ -3,7 +3,7 @@ name = "linkerd-app-test"
 version = "0.1.0"
 authors = ["Linkerd Developers <cncf-linkerd-dev@lists.cncf.io>"]
 license = "Apache-2.0"
-edition = "2018"
+edition = "2021"
 publish = false
 description = """
 Proxy integration tests
@@ -21,7 +21,7 @@ futures = { version = "0.3", default-features = false }
 h2 = "0.3"
 http = "0.2"
 http-body = "0.4"
-hyper = { version = "0.14.13", features = ["http1", "http2"] }
+hyper = { version = "0.14.14", features = ["http1", "http2"] }
 linkerd-app-core = { path = "../core" }
 linkerd-identity = { path = "../../identity" }
 linkerd-io = { path = "../../io", features = ["tokio-test"] }

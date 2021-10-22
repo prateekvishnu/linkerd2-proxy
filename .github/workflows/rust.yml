@@ -3,6 +3,12 @@ name: Rust PR
 on:
   pull_request: {}
 
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUST_BACKTRACE: short
+  RUSTUP_MAX_RETRIES: 10
+
 jobs:
 
   ## Required builds
@@ -24,7 +30,7 @@ jobs:
     timeout-minutes: 5
     runs-on: ubuntu-latest
     container:
-      image: docker://rust:1.55.0-buster
+      image: docker://rust:1.56.0-buster
     permissions:
       contents: read
     steps:
@@ -37,7 +43,7 @@ jobs:
     timeout-minutes: 20
     runs-on: ubuntu-latest
     container:
-      image: docker://rust:1.55.0-buster
+      image: docker://rust:1.56.0-buster
     permissions:
       contents: read
     steps:
@@ -49,7 +55,7 @@ jobs:
     timeout-minutes: 5
     runs-on: ubuntu-latest
     container:
-      image: docker://rust:1.55.0-buster
+      image: docker://rust:1.56.0-buster
     permissions:
       contents: read
     steps:
