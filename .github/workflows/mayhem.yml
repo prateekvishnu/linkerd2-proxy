@@ -17,7 +17,7 @@ env:
   
 jobs:
   build:
-    name: '${{ matrix.os }} shared=${{ matrix.shared }} ${{ matrix.build_type }}'
+    name: ${{ matrix.os }} shared=${{ matrix.shared }} ${{ matrix.build_type }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -57,49 +57,49 @@ jobs:
         uses: ForAllSecure/mcode-action@v1
         with:
           mayhem-token: ${{ secrets.MAYHEM_TOKEN }}
-          args: --image ${{ steps.meta.outputs.tags }} --file ${{ env.ADDR_MAYHEMFILE }}
+          args: --image ${{ steps.meta.outputs.tags }} --file ${{ env.ADDR_MAYHEMFILE }}  --duration 300
           sarif-output: sarif
 
       - name: Start analysis for dns
         uses: ForAllSecure/mcode-action@v1
         with:
           mayhem-token: ${{ secrets.MAYHEM_TOKEN }}
-          args: --image ${{ steps.meta.outputs.tags }} --file ${{ env.DNS_MAYHEMFILE }}
+          args: --image ${{ steps.meta.outputs.tags }} --file ${{ env.DNS_MAYHEMFILE }}  --duration 300
           sarif-output: sarif
 
       - name: Start analysis for raw
         uses: ForAllSecure/mcode-action@v1
         with:
           mayhem-token: ${{ secrets.MAYHEM_TOKEN }}
-          args: --image ${{ steps.meta.outputs.tags }} --file ${{ env.RAW_MAYHEMFILE }}
+          args: --image ${{ steps.meta.outputs.tags }} --file ${{ env.RAW_MAYHEMFILE }}  --duration 300
           sarif-output: sarif
 
       - name: Start analysis for structured
         uses: ForAllSecure/mcode-action@v1
         with:
           mayhem-token: ${{ secrets.MAYHEM_TOKEN }}
-          args: --image ${{ steps.meta.outputs.tags }} --file ${{ env.STRUCTURED_MAYHEMFILE }}
+          args: --image ${{ steps.meta.outputs.tags }} --file ${{ env.STRUCTURED_MAYHEMFILE }}  --duration 300
           sarif-output: sarif
 
       - name: Start analysis for http
         uses: ForAllSecure/mcode-action@v1
         with:
           mayhem-token: ${{ secrets.MAYHEM_TOKEN }}
-          args: --image ${{ steps.meta.outputs.tags }} --file ${{ env.HTTP_MAYHEMFILE }}
+          args: --image ${{ steps.meta.outputs.tags }} --file ${{ env.HTTP_MAYHEMFILE }}  --duration 300
           sarif-output: sarif
 
       - name: Start analysis for inbound
         uses: ForAllSecure/mcode-action@v1
         with:
           mayhem-token: ${{ secrets.MAYHEM_TOKEN }}
-          args: --image ${{ steps.meta.outputs.tags }} --file ${{ env.INBOUND_MAYHEMFILE }}
+          args: --image ${{ steps.meta.outputs.tags }} --file ${{ env.INBOUND_MAYHEMFILE }}  --duration 300
           sarif-output: sarif
 
       - name: Start analysis for tls
         uses: ForAllSecure/mcode-action@v1
         with:
           mayhem-token: ${{ secrets.MAYHEM_TOKEN }}
-          args: --image ${{ steps.meta.outputs.tags }} --file ${{ env.TLS_MAYHEMFILE }}
+          args: --image ${{ steps.meta.outputs.tags }} --file ${{ env.TLS_MAYHEMFILE }}  --duration 300
           sarif-output: sarif
 
 
